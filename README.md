@@ -1,4 +1,23 @@
 # Single Race mode for NFS Hot Pursuit Remastered
+Ever since the original NFS Hot Pursuit was released in 2010, I always wondered why the developers never implemented customizable single player races. Up until then, that feature had been present in all Need for Speed games and most racing games to date. I always felt that this severely decreased the replay value of the game - because each time I fired up an event, it looked exactly the same. I was also frustrated that in order to take my favourite car for a spin, I would have to browse through the extensive event list, to find the one that 1) mercifully lets me use the car that I want, and 2) more or less has the settings that I fancied playing at the moment (mode, weather, time of day etc.)
+
+As someone who was never interested in multiplayer, I discarded the game pretty quickly. I would instead go back to play the original six Need for Speed games (TNFS - NFSHP2), because there I could freely set up races to my liking, instead of having to work with whatever the developers thought was "cool" at that time.
+
+When Hot Pursuit Remastered came about, I was hoping that Stellar Entertainment would add a proper Single Race mode, but of course, that did not happen.
+
+Then I started experimenting with Claude, working on smaller mods for other games. This eventually led me to make the [Event Randomizer mod](https://github.com/HungryManticore/NFSHPR-EventRandomizer), which randomizes the opponents, time of day, and weather in the Career mode. Once I got that working correctly, I thought I would try my luck and see if implementing fully customizable single races into the game was possible.
+
+This mod is the result of that 16-year-old frustration, and also proof that the game engine handles custom races just fine (except a minor cop spawning bug - see the **Known issues** section below). Which makes me think that Criterion/Stellar could have done it easily themselves; they chose not to.
+
+# What you get
+- 100+ tracks to choose from; both Career and Multiplayer routes are used. Tracks are based on the vanilla game routes - Race, Duel, Hot Pursuit, Gauntlet, Preview, Rapid Response, and Time Trials.
+- You can play each track either as a Race, a racer Hot Pursuit, or a cop Hot Pursuit.
+- You can choose time of day, weather, and difficulty level (Easy/Medium/Hard).
+- You can pick the number of AI opponents: 1-7 in Race and cop Hot Pursuit. The racer Hot Pursuit events are limited to 7 bots total due to engine limitations, but you can freely choose between 1-6 racers and 1-6 cops as long as the total number does not exceed 7.
+- You can select any car from any class; the AI racers and cops will be randomized, based on the class of your vehicle.
+- You can customize your weapons. Two options are available: Custom, where you can choose whatever you want, and Classic Hot Pursuit inspired by NFS3, NFS High Stakes and NFS Hot Pursuit 2 where racers get no weapons, and cops get to use Helicopter, Roadblock, and Spike Strips.
+- The Single Race event picker, as well as the race loading screen correctly display current Single Race settings.
+- The Career mode remains untouched.
 
 # Installation
 Download the latest [release](../../releases). Unpack everything to the game's root directory.
@@ -11,10 +30,20 @@ Download the latest [release](../../releases). Unpack everything to the game's r
 - Pick an event from the map and accept it. You will then proceed to the car selection screen. Accept your car to start the race.
 
 # Screenshots
+<img width="2560" height="1600" alt="main menu" src="https://github.com/user-attachments/assets/33995e31-00db-4c4d-88e2-8afa6d650554" />
+<img width="2560" height="1600" alt="picker" src="https://github.com/user-attachments/assets/12ffaed9-6431-480c-86bd-bdae19a9970a" />
+<img width="2560" height="1600" alt="weapons" src="https://github.com/user-attachments/assets/8929b46b-b20b-4bc6-9d0e-8c4e203eed5e" />
+<img width="2560" height="1600" alt="race setup" src="https://github.com/user-attachments/assets/fd5512d9-064a-4257-9aad-ec64b4a417d1" />
+<img width="2560" height="1600" alt="track list" src="https://github.com/user-attachments/assets/243f7355-0ad1-4e86-a55b-ecab3322f92e" />
 
-# Known issues
+
+# Known issues and limitations
 - **Rain does not work in certain conditions.** This is an issue in the vanilla game as well - there are certain zones/times of day where rain does not appear even if selected in Single Race. I have not yet found a proper fix.
-- **Respawned cops sometimes appear in incorrect locations**, such as on top of guard rails. This is due to how the game calculates their spawn points.
+- **Respawned cops sometimes appear in incorrect locations**, such as on top of guard rails. This is due to how the vanilla game calculates their spawn points.
+- **Unknown compatibility with the [Event Randomizer mod](https://github.com/HungryManticore/NFSHPR-EventRandomizer).** They will likely conflict with one another, so it's best to avoid using both at the same time.
+- **Multiplayer has not been tested**. In theory, the mod should not touch the online mode.
+
+I will try to find the way to fix the cop spawning and the weather patterns, though I cannot make any promises at this stage.
 
 # AI disclosure
 This project was made with Claude; I tested it myself.
