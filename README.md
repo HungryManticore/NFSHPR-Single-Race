@@ -1,4 +1,7 @@
 # Single Race mode for NFS Hot Pursuit Remastered
+A mod that adds customizable Single Race mode to the game, replacing the Wall menu.
+
+# A long rant about how we got here
 Ever since the original NFS Hot Pursuit was released in 2010, I always wondered why the developers never implemented customizable single player races. Up until then, that feature had been present in all Need for Speed games and most racing games to date. I always felt that this severely decreased the replay value of the game - because each time I fired up an event, it looked exactly the same. I was also frustrated that in order to take my favourite car for a spin, I would have to browse through the extensive event list, to find the one that 1) mercifully lets me use the car that I want, and 2) more or less has the settings that I fancied playing at the moment (mode, weather, time of day etc.)
 
 As someone who was never interested in multiplayer, I discarded the game pretty quickly. I would instead go back to play the original six Need for Speed games (TNFS - NFSHP2), because there I could freely set up races to my liking, instead of having to work with whatever the developers thought was "cool" at that time.
