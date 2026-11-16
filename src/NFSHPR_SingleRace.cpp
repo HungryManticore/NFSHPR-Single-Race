@@ -594,6 +594,10 @@ int Hook_SwitchLayoutSet(lua_State* L) {
 // Event = hash 885312e1; OpponentData lists = {pointer array, count, 8}.
 const uint32_t kHashEventRoot = 0x3F409A86, kEventRootId = 411487, kHashEvent = 0x885312E1;
 const uint32_t kOffCopCount = 0x74, kOffCopList = 0x78, kOffRacerCount = 0xFC, kOffRacerList = 0x100;
+// MedalData[] (field 7c7a9566): gold / silver / bronze, each {bounty, busts needed, 99, 0, time}. The cop Hot
+// Pursuit events (bundle v11) carry Crimewave's list (7 / 6 / 5 busts); the helper fits it to the racer count.
+const uint32_t kOffMedalList = 0xE8, kHashMedalData = 0x63D64900, kOffMedalBusts = 4;
+
 volatile uintptr_t g_eventRoot;   // the root instance, once found
 volatile LONG g_rootSearch;       // 1 while a background search runs
 
@@ -705,6 +709,31 @@ int ListRoom(uintptr_t f, int cap, uint32_t* countNow) {
     return k;
 }
 
+// Cop Hot Pursuit: the busts needed for gold / silver / bronze = the racers, one fewer, two fewer (at least 1).
+void FitCopMedals(uint32_t eventId, uintptr_t d, int racers) {
+    uintptr_t arr = 0;
+    uint32_t cnt = 0, es = 0;
+    if (!SafeRead(d + kOffMedalList, &arr, 8) || !SafeRead(d + kOffMedalList + 8, &cnt, 4) ||
+        !SafeRead(d + kOffMedalList + 12, &es, 4) || !arr || es != 8 || cnt == 0 || cnt > 3) {
+        Log("medals: event %u has no medal list (count %u) - an older CHALLENGEINSTANCES.BNDL?", eventId, cnt);
+        return;
+    }
+    char text[64];
+    int o = 0;
+    for (uint32_t k = 0; k < cnt; ++k) {
+        uintptr_t p = 0;
+        if (!SafeRead(arr + 8 * (uintptr_t)k, &p, 8) || !Instance(p, kHashMedalData, nullptr)) {
+            Log("medals: event %u: medal %u is not MedalData - not changed", eventId, k);
+            return;
+        }
+        int want = racers - (int)k;
+        uint32_t busts = (uint32_t)(want < 1 ? 1 : want);
+        bool ok = WriteMem((void*)(p + 0x30 + kOffMedalBusts), &busts, 4);
+        o += _snprintf(text + o, sizeof(text) - o, "%s%u%s", k ? " / " : "", busts, ok ? "" : "!");
+    }
+    Log("medals: event %u: busts needed %s (gold / silver / bronze, %d racers)", eventId, text, racers);
+}
+
 // Writes the AI count chosen in the overlay into the launched Single Race event; sets g_eventRacers / g_eventCops
 // and the Hot Pursuit start slots to what the event will have.
 void ApplyAICount(uint32_t eventId, Mode mode, const Conditions& c) {
@@ -744,6 +773,7 @@ void ApplyAICount(uint32_t eventId, Mode mode, const Conditions& c) {
                     fieldC, listC, roomC, ok ? "" : " - WRITE FAILED");
         }
     }
+    if (p && mode == kCopPursuit) FitCopMedals(eventId, p + 0x30, haveR);
     InterlockedExchange(&g_eventRacers, haveR);
     InterlockedExchange(&g_eventCops, haveC);
     if (hp || mode == kCopPursuit) BuildHpSlots(haveR, haveC);   // the cop side: AI racers in front, the player behind
@@ -2353,6 +2383,8 @@ bool InstallLoadingScreenHooks() {
 // numbers as Autolog.Controls.SRInfo.<name>. Weapons follow the overlay: Race mode has none (0); Hot Pursuit
 // shows the Classic Hot Pursuit charges or the Custom ones from the ini. GridSize: the racers incl. the player
 // (AI count + 1, per mode).
+// "SR.Time" is the details tab's time of day as text ("15:30HRS"); "SR.Weather1" / "SR.Weather2" are its two
+// condition icon ids (time icon; wet / rain / lightning, 0 = none) - see sr_info.lua.
 // "SR.Summary" (v25) is a string for the info panel's first tab (the event description text, 4 lines):
 // mode / DIFFICULTY / OPPONENTS (AI racers, not the player) / COPS (Hot Pursuit only).
 // Any other binding string goes to the game's function unchanged.
@@ -2376,6 +2408,10 @@ bool PickerValue(const char* s, size_t len, int* v) {
         *v = (c.eventMode == kModeHotPursuit ? c.hpRacers : cop ? c.copRacers : c.raceRacers) + 1;
         return true;
     }
+    // time / weather icons for the details tab (published by sr_info.lua; before the first event the
+    // ChallengeReporter data source those fields used does not exist yet)
+    if (StrIs(s, len, "Weather1")) { *v = (int)TimeIcon(c.time); return true; }
+    if (StrIs(s, len, "Weather2")) { *v = (int)WeatherIconId(c.weather); return true; }
     for (int w = 0; w < kWeaponCount; ++w)
         if (StrIs(s, len, kWeaponKeys[w])) {
             *v = !hp ? 0 : c.weaponsMode == kWeaponsClassic ? kClassicCharges[w] : c.charges[w];
@@ -2414,6 +2450,15 @@ int Hook_ResolveStringBinding(lua_State* L) {
             for (char* q = sum; *q; ++q)
                 if (*q == '\n') *q = '|';
             Log("picker details: summary \"%s\"", sum);
+        }
+        if (StrIs(s + 3, len - 3, "Time")) {  // "12:00HRS", as the game's (TIME,OFDAY) format shows it
+            int minutes = (int)(WrapHour(kTimeHours[c.time]) * 60.0 + 0.5) % (24 * 60);
+            char t[16];
+            _snprintf(t, sizeof(t), "%02d:%02dHRS", minutes / 60, minutes % 60);
+            t[sizeof(t) - 1] = 0;
+            lua_settop_(L, 0);
+            lua_pushstring_(L, t);
+            return 1;
         }
         if (StrIs(s + 3, len - 3, "Summary")) {
             char sum[128];
