@@ -35,7 +35,7 @@ Download the latest [release](../../releases). Unpack everything to the game's r
 # Screenshots
 <img width="1920" height="1080" alt="Screenshot (57)" src="https://github.com/user-attachments/assets/0ce98009-52a0-4150-b98a-ad61afc5f26b" />
 <img width="1920" height="1080" alt="Screenshot (58)" src="https://github.com/user-attachments/assets/becba3d5-cc8b-4ecd-8144-9e7a21f6612c" />
-<img width="1920" height="1080" alt="Screenshot (59)" src="https://github.com/user-attachments/assets/7de4a6be-cd2f-4562-9078-a9e6c09b8a61" />
+<img width="1920" height="1080" alt="Screenshot (64)" src="https://github.com/user-attachments/assets/d8e64dd1-026c-413e-9124-6b1ac1f736f9" />
 <img width="1920" height="1080" alt="Screenshot (60)" src="https://github.com/user-attachments/assets/00ab029f-506e-456b-8835-1282ebf6d37a" />
 <img width="1920" height="1080" alt="Screenshot (61)" src="https://github.com/user-attachments/assets/65252f2c-2f35-4b9f-a2d3-e4340adcb59c" />
 
