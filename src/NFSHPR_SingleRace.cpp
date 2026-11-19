@@ -52,6 +52,9 @@
 //     while the picker is on screen (as on the loading screen); its weapon counts and grid size are bound to
 //     Autolog.Controls.SRInfo.*, set every frame by the bundle's sr_info.lua from
 //     ResolveStringBinding("SR.<name>"), which the helper answers (see the picker details section).
+//     v34: the "RACE SETTINGS" prompt is in the picker's own footer prompt bar (WALL v12, sr_info.lua); its input
+//     (to_main_menu: Menu/Start, or the key the game binds to it; v35: Select no longer opens it) calls ResolveStringBinding("SR.OpenSettings"),
+//     which opens the overlay. The overlay's top-right hint is gone.
 //
 // 10. AI count (v24). The overlay sets the number of AI racers (Race 1-7; Hot Pursuit 1-6) and cops (Hot Pursuit
 //     1-6; racers + cops <= 7), kept per mode in the ini ([Race] Racers, [HotPursuit] Racers / Cops). The event
@@ -2426,6 +2429,16 @@ int Hook_ResolveStringBinding(lua_State* L) {
     const char* s;
     size_t len;
     if (lua_gettop_(L) >= 1 && ArgStr(L, 1, &s, &len) && len > 3 && memcmp(s, "SR.", 3) == 0) {
+        // v34: the picker's footer prompt "RACE SETTINGS" (sr_info.lua, input to_main_menu) opens the overlay
+        if (StrIs(s + 3, len - 3, "OpenSettings")) {
+            if (SR_PickerVisible()) {
+                Log("picker: Race Settings prompt pressed");
+                SR_RequestMenu();
+            }
+            lua_settop_(L, 0);
+            lua_pushboolean_(L, 1);
+            return 1;
+        }
         int v = 0;
         bool known = PickerValue(s + 3, len - 3, &v);
         Conditions c = SR_GetConditions();
@@ -2648,7 +2661,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         if (GetFileSize(g_log, nullptr) > (1u << 20)) SetEndOfFile(g_log);
         SetFilePointer(g_log, 0, nullptr, FILE_END);
     }
-    Log("---- NFSHPR Single Race helper 33 (%d cars in the class table)", kVehicleCount);
+    Log("---- NFSHPR Single Race helper 35 (%d cars in the class table)", kVehicleCount);
     HANDLE t = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     // the label search starts at once: the main menu copies its texts before the game code is unpacked
