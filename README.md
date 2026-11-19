@@ -47,5 +47,8 @@ Download the latest [release](../../releases). Unpack everything to the game's r
 
 I will try to find the way to fix the cop spawning and the weather patterns, though I cannot make any promises at this stage.
 
+# Special thanks
+ThirteenAG for the [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases)
+
 # AI disclosure
 This project was made with Claude; I tested it myself.
