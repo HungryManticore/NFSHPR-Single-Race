@@ -8,7 +8,8 @@
 // * Only on the Single Race event picker (SR_PickerVisible).
 // * Controller: XInputGetState / XInputGetStateEx of xinput1_3.dll (the game's XInput) are redirected
 //   to the same functions of xinput1_4.dll (or xinput9_1_0.dll); the plugin sees the real pad state
-//   and the game gets an empty pad while the menu is open. Select (Back) opens the menu.
+//   and the game gets an empty pad while the menu is open. v35: the game's Menu/Start input opens the menu (the
+//   picker's footer prompt, sr_info.lua -> SR.OpenSettings); Start also closes it. Select does nothing on the picker.
 // * Its own controller-friendly menu in two tabs (Race setup, Weapons): up/down picks the row (row 0 is the
 //   tab bar), left/right changes it (on the tab bar: switches tabs), LB / RB switch tabs from any row,
 //   A / Enter saves and closes, B / Esc cancels and closes.
@@ -103,12 +104,16 @@ int RowId(int index) {
 ULONGLONG Now() { return GetTickCount64(); }
 bool InputBlocked() { return g_menuOpen || Now() < g_blockUntil; }
 
+// v34: set by the game thread when sr_info.lua's footer prompt input is pressed (SR.OpenSettings); taken by
+// HandleInput on the next frame.
+volatile LONG g_menuRequest;
+
 // ====================================================================== XInput
 
 struct XGamepad { WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; };
 struct XState { DWORD packet; XGamepad pad; };
 typedef DWORD(WINAPI* XGetState_t)(DWORD, XState*);
-const WORD kPadUp = 0x0001, kPadDown = 0x0002, kPadLeft = 0x0004, kPadRight = 0x0008, kPadBack = 0x0020, kPadLB = 0x0100,
+const WORD kPadUp = 0x0001, kPadDown = 0x0002, kPadLeft = 0x0004, kPadRight = 0x0008, kPadStart = 0x0010, kPadBack = 0x0020, kPadLB = 0x0100,
            kPadRB = 0x0200, kPadA = 0x1000, kPadB = 0x2000;
 
 XGetState_t g_realGetState, g_realGetStateEx;
@@ -128,7 +133,7 @@ DWORD Filter(DWORD idx, DWORD r, XState* s) {
     if (active && !wasActive[idx]) InterlockedIncrement(&g_padActivity);
     wasActive[idx] = active;
     if (InputBlocked() || g_waitPadRelease) memset(&s->pad, 0, sizeof(s->pad));
-    else if (SR_PickerVisible()) s->pad.buttons &= (WORD)~kPadBack;  // Select belongs to the overlay here
+    else if (SR_PickerVisible()) s->pad.buttons &= (WORD)~kPadBack;  // Select does nothing on the picker (v35)
     return r;
 }
 DWORD WINAPI Hook_XInputGetState(DWORD idx, XState* s) { return Filter(idx, g_realGetState(idx, s), s); }
@@ -331,15 +336,6 @@ void PromptBar(const Prompt* ps, int n, ImU32 col) {
     ImGui::Dummy(ImVec2(w, h));
 }
 
-// Key name for a keycap: F1..F24, otherwise Windows' name for the key, in capitals.
-const char* KeycapName(int vk, char* out, int size) {
-    if (vk >= VK_F1 && vk <= VK_F24) { sprintf(out, "F%d", vk - VK_F1 + 1); return out; }
-    char n[32] = {0};
-    UINT sc = MapVirtualKeyA((UINT)vk, 0 /* MAPVK_VK_TO_VSC */);
-    if (!sc || !GetKeyNameTextA((LONG)(sc << 16), n, sizeof(n))) sprintf(n, "KEY %d", vk);
-    return Upper(n, out, size);
-}
-
 // ---------------------------------------------------------------------- the menu
 
 void MeasureLayout() {
@@ -492,30 +488,8 @@ void DrawMenu() {
     ImGui::End();
 }
 
-// The settings themselves are shown natively in the picker's info panel (helper v25), so the hint only says
-// how to open the menu (v26): Select on the controller, the menu key on the keyboard (v28: as a game prompt).
-void DrawHint() {
-    Conditions c = SR_GetConditions();
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - g_fontPx, g_fontPx), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.6f);
-    ImGui::Begin("##srhint", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-    char k[32];
-    if (!g_iconsReady) {
-        char text[64];
-        sprintf(text, "Race Settings: Select / %s", KeyName(c.menuKey, k));
-        ImGui::TextUnformatted(text);
-    } else if (g_inputDev == kDevPad) {
-        const Prompt p = {IconPadView, -1, nullptr, "Race Settings"};
-        PromptBar(&p, 1, ImGui::GetColorU32(ImGuiCol_Text));
-    } else {
-        const Prompt p = {-1, -1, KeycapName(c.menuKey, k, sizeof(k)), "Race Settings"};
-        PromptBar(&p, 1, ImGui::GetColorU32(ImGuiCol_Text));
-    }
-    ImGui::End();
-}
+// v34: the top-right "Race Settings" hint (v26-v33) is removed: the picker's footer prompt bar shows it
+// natively (WALL v12, sr_info.lua).
 
 // ====================================================================== window procedure
 
@@ -747,7 +721,7 @@ bool InitImGui(IDXGISwapChain* sc) {
                                       : SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, (LONG_PTR)OverlayWndProc));
     char k[16];
     SR_Log("overlay: ready on window %p (%dx%d back buffer, font %d px, game fonts %s, prompts %s, starting with %s), "
-           "menu key %s or Select", (void*)g_hwnd, (int)desc.BufferDesc.Width, (int)desc.BufferDesc.Height, (int)g_fontPx,
+           "menu key %s or the footer prompt (Menu/Start)", (void*)g_hwnd, (int)desc.BufferDesc.Width, (int)desc.BufferDesc.Height, (int)g_fontPx,
            g_fontReg != g_fontIt ? "yes" : "no", g_iconsReady ? "yes" : "no", g_inputDev == kDevPad ? "controller" : "keyboard",
            KeyName(SR_GetConditions().menuKey, k));
     return true;
@@ -820,13 +794,14 @@ void HandleInput() {
 
     if (!pad) g_waitPadRelease = false;
     bool picker = SR_PickerVisible();
+    bool requested = InterlockedExchange(&g_menuRequest, 0) != 0;  // footer prompt input (sr_info.lua)
     if (!g_menuOpen) {
-        if (picker && (key(&Keys::menuKey) || btn(kPadBack))) OpenMenu();
+        if (picker && (key(&Keys::menuKey) || (requested && !InputBlocked()))) OpenMenu();
     } else if (!picker) {
         CloseMenu(false);
     } else if (key(&Keys::enter) || btn(kPadA)) {
         CloseMenu(true);
-    } else if (key(&Keys::esc) || key(&Keys::back) || key(&Keys::menuKey) || btn(kPadB) || btn(kPadBack)) {
+    } else if (key(&Keys::esc) || key(&Keys::back) || key(&Keys::menuKey) || btn(kPadB) || btn(kPadStart)) {
         CloseMenu(false);
     } else {
         if (key(&Keys::up) || btn(kPadUp)) MoveRow(-1);
@@ -856,7 +831,7 @@ void OnPresent(IDXGISwapChain* sc) {
     }
     RebindDevice(sc);
     HandleInput();
-    if (!g_menuOpen && !SR_PickerVisible()) {
+    if (!g_menuOpen) {  // v34: no hint on the picker (the prompt is in the game's footer)
         LeaveCriticalSection(&g_imguiLock);
         return;
     }
@@ -865,8 +840,7 @@ void OnPresent(IDXGISwapChain* sc) {
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-    if (g_menuOpen) DrawMenu();
-    else DrawHint();
+    DrawMenu();
     ImGui::Render();
 
     ID3D11Texture2D* bb = nullptr;
@@ -965,6 +939,8 @@ bool HookD3D() {
 }
 
 }  // namespace
+
+void SR_RequestMenu() { InterlockedExchange(&g_menuRequest, 1); }
 
 void Overlay_Start() {
     InitializeCriticalSection(&g_imguiLock);

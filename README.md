@@ -28,7 +28,7 @@ Download the latest [release](../../releases). Unpack everything to the game's r
 # How to use
 - Upon starting the game, you'll notice that the Wall menu has been replaced with Single Race.
 - When you enter it, the game displays all Single Race tracks for you to choose, similar how the Career mode presents them.
-- Press F5 on the keyboard or Select on your controller to bring up the race setup menu.
+- Press Start on your controller (or the key shown next to **Race Settings** at the bottom of the screen; F5 also works) to bring up the race setup menu.
 - You can switch between the Race Setup and Weapons tabs by highlighting them and pressing the arrow keys or left or right on your D-pad. You can also switch between them using LB/RB on your controller. Hit A / Enter to confirm your selection.
 - Pick an event from the map and accept it. You will then proceed to the car selection screen. Accept your car to start the race.
 

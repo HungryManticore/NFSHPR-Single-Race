@@ -53,6 +53,7 @@ extern const char* const kDifficultyNames[kDifficultyCount];  // "Easy", "Medium
 Conditions SR_GetConditions();
 void SR_SetConditions(const Conditions& c);  // also writes the ini
 bool SR_PickerVisible();                      // the Single Race event picker is on screen
+void SR_RequestMenu();  // sr_info.lua asked for Race Settings (picker footer prompt, v34); opened on the next frame
 void SR_Log(const char* fmt, ...);
 
 void Overlay_Start();  // called once the game code is verified and the game hooks are in
