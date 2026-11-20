@@ -16,6 +16,7 @@ This mod is the result of that 16-year-old frustration, and also proof that the 
 - 100+ tracks to choose from; both Career and Multiplayer routes are used. Tracks are based on the vanilla game routes - Race, Duel, Hot Pursuit, Gauntlet, Preview, Rapid Response, and Time Trials.
 - You can play each track either as a Race, a racer Hot Pursuit, or a cop Hot Pursuit.
 - You can choose time of day, weather, and difficulty level (Easy/Medium/Hard).
+- You can turn time progression on or off: with it off, the clock stays at the time of day you picked for the whole event.
 - You can pick the number of AI opponents: 1-7 in Race and cop Hot Pursuit. The racer Hot Pursuit events are limited to 7 bots total due to engine limitations, but you can freely choose between 1-6 racers and 1-6 cops as long as the total number does not exceed 7.
 - You can select any car from any class; the AI racers and cops will be randomized, based on the class of your vehicle.
 - You can customize your weapons. Two options are available: Custom, where you can choose whatever you want, and Classic Hot Pursuit inspired by NFS3, NFS High Stakes and NFS Hot Pursuit 2 where racers get no weapons, and cops get to use Helicopter, Roadblock, and Spike Strips.

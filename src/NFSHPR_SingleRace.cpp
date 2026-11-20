@@ -1043,6 +1043,8 @@ const char kDefaultIni[] =
     "TimeOfDay=Noon\r\n"
     "; Weather: Dry, Wet, Rain, Storm\r\n"
     "Weather=Dry\r\n"
+    "; TimeProgression: On = the clock runs as in the event, Off = it stays at the chosen time\r\n"
+    "TimeProgression=On\r\n"
     "\r\n"
     "[Weapons]\r\n"
     "; Single Race Hot Pursuit events. Classic = no weapons for racers, cops have spike strips, roadblocks and\r\n"
@@ -1072,7 +1074,7 @@ const char kDefaultIni[] =
 
 CRITICAL_SECTION g_condLock;
 Conditions g_cond = {kModeRace, kNoon, kDry, kWeaponsClassic, {2, 2, 1, 1, 2, 2, 2, 1}, VK_F5, 0, kMedium,
-                     kDefaultRaceRacers, kDefaultHpRacers, kDefaultHpCops, kDefaultCopRacers};
+                     kDefaultRaceRacers, kDefaultHpRacers, kDefaultHpCops, kDefaultCopRacers, 1};
 const int kDefaultCharges[kWeaponCount] = {2, 2, 1, 1, 2, 2, 2, 1};
 
 int NameIndex(const wchar_t* text, const char* const* names, int count, int def) {
@@ -1110,6 +1112,11 @@ void LoadConditions() {
     c.time = NameIndex(t, kTimeNames, kTimeCount, kNoon);
     GetPrivateProfileStringW(L"Conditions", L"Weather", L"Dry", t, 64, g_iniPath);
     c.weather = NameIndex(t, kWeatherNames, kWeatherCount, kDry);
+    // time progression (v36; an older ini: add it, On = the behaviour of earlier helpers)
+    if (!GetPrivateProfileStringW(L"Conditions", L"TimeProgression", L"", t, 64, g_iniPath))
+        WritePrivateProfileStringW(L"Conditions", L"TimeProgression", L"On", g_iniPath);
+    GetPrivateProfileStringW(L"Conditions", L"TimeProgression", L"On", t, 64, g_iniPath);
+    c.timeProgression = !(_wcsicmp(t, L"Off") == 0 || _wcsicmp(t, L"0") == 0 || _wcsicmp(t, L"false") == 0);
     GetPrivateProfileStringW(L"Overlay", L"Key", L"F5", t, 64, g_iniPath);
     c.menuKey = VK_F5;
     if ((t[0] == L'F' || t[0] == L'f') && t[1] >= L'1' && t[1] <= L'9') {
@@ -1471,6 +1478,9 @@ int Hook_SetTimeOfDay(lua_State* L) {
         double span = finishIsNumber ? *(double*)ArgSlot(L, 2) - start : 0.0;  // the clock runs as in the event
         double ns = WrapHour(kTimeHours[c.time]);
         *(double*)ArgSlot(L, 1) = ns;
+        // Time progression Off (v36): the finish is a moment after the start, so the clock barely moves (finish =
+        // start exactly could be read as a full 24-hour lap, as a negative span wraps the long way round)
+        if (!c.timeProgression) span = 0.001;
         if (finishIsNumber) *(double*)ArgSlot(L, 2) = WrapHour(ns + span);
         if (top >= 8) SetFlagArg(L, 8, false);  // drop the event's fixed sun direction
     }
@@ -1480,7 +1490,8 @@ int Hook_SetTimeOfDay(lua_State* L) {
         SetFlagArg(L, 6, c.weather == kStorm);
     }
     LogTimeArgs(L, "new time/weather:  ");
-    Log("conditions: %s, %s", kTimeNames[c.time], kWeatherLabels[c.weather]);
+    Log("conditions: %s, %s, time progression %s", kTimeNames[c.time], kWeatherLabels[c.weather],
+        c.timeProgression ? "on" : "off");
     return g_bindings[kSetTimeOfDay].original(L);
 }
 
@@ -2592,6 +2603,7 @@ void SR_SetConditions(const Conditions& c) {
     g_cond.hpRacers = c.hpRacers;
     g_cond.hpCops = c.hpCops;
     g_cond.copRacers = c.copRacers;
+    g_cond.timeProgression = c.timeProgression;
     LeaveCriticalSection(&g_condLock);
     wchar_t w[32];
     MultiByteToWideChar(CP_ACP, 0, kEventModeNames[c.eventMode], -1, w, 32);
@@ -2602,6 +2614,7 @@ void SR_SetConditions(const Conditions& c) {
     WritePrivateProfileStringW(L"Conditions", L"TimeOfDay", w, g_iniPath);
     MultiByteToWideChar(CP_ACP, 0, kWeatherNames[c.weather], -1, w, 32);
     WritePrivateProfileStringW(L"Conditions", L"Weather", w, g_iniPath);
+    WritePrivateProfileStringW(L"Conditions", L"TimeProgression", c.timeProgression ? L"On" : L"Off", g_iniPath);
     MultiByteToWideChar(CP_ACP, 0, kWeaponsModeNames[c.weaponsMode], -1, w, 32);
     WritePrivateProfileStringW(L"Weapons", L"Mode", w, g_iniPath);
     for (int i = 0; i < kWeaponCount; ++i) {
