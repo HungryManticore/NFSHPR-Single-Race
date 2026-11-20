@@ -31,6 +31,7 @@ struct Conditions {
     int hpRacers;    // Hot Pursuit: AI racers, kHpMin..kHpRacersMax
     int hpCops;      // Hot Pursuit: cops, kHpMin..kHpCopsMax; hpRacers + hpCops <= kMaxAI
     int copRacers;   // Cop Hot Pursuit (v29, ini [CopHotPursuit] Racers): AI racers, kCopRacersMin..kCopRacersMax
+    int timeProgression;  // v36, ini [Conditions] TimeProgression=On|Off: 1 = the clock runs as in the event, 0 = it stays at the start time
 };
 // AI count limits: 8 cars in an event (the player + 7). The Hot Pursuit events hold 6 racers and 6 cops.
 const int kMaxAI = 7, kRaceRacersMin = 1, kRaceRacersMax = 7, kHpMin = 1, kHpRacersMax = 6, kHpCopsMax = 6;

@@ -73,13 +73,14 @@ int g_row;      // index into the visible rows of the current tab (VisibleRows);
 enum Tab { kTabSetup, kTabWeapons, kTabCount };
 const char* const kTabNames[kTabCount] = {"Race setup", "Weapons"};
 int g_tab;
-enum { kRowTabs, kRowMode, kRowTime, kRowWeather, kRowDifficulty, kRowRacers, kRowCops, kRowWeapons, kRowFirstCharge };
+enum { kRowTabs, kRowMode, kRowTime, kRowTimeProgression, kRowWeather, kRowDifficulty, kRowRacers, kRowCops, kRowWeapons, kRowFirstCharge };
 int VisibleRows(int* ids) {
     int n = 0;
     ids[n++] = kRowTabs;
     if (g_tab == kTabSetup) {
         ids[n++] = kRowMode;
         ids[n++] = kRowTime;
+        ids[n++] = kRowTimeProgression;
         ids[n++] = kRowWeather;
         ids[n++] = kRowDifficulty;
         ids[n++] = kRowRacers;
@@ -191,9 +192,9 @@ void CloseMenu(bool save) {
     g_waitPadRelease = true;
     g_waitKeyRelease = true;
     Conditions c = SR_GetConditions();
-    SR_Log("conditions menu %s: %s, %s, %s, %s, weapons %s (racers %d %d %d %d, cops %d %d %d %d), AI: race %d racers, "
+    SR_Log("conditions menu %s: %s, %s, %s (time progression %s), %s, weapons %s (racers %d %d %d %d, cops %d %d %d %d), AI: race %d racers, "
            "hot pursuit %d racers + %d cops, cop hot pursuit %d racers", save ? "saved" : "cancelled",
-           kEventModeNames[c.eventMode], kDifficultyNames[c.difficulty], kTimeNames[c.time], kWeatherNames[c.weather], kWeaponsModeNames[c.weaponsMode], c.charges[0], c.charges[1],
+           kEventModeNames[c.eventMode], kDifficultyNames[c.difficulty], kTimeNames[c.time], c.timeProgression ? "on" : "off", kWeatherNames[c.weather], kWeaponsModeNames[c.weaponsMode], c.charges[0], c.charges[1],
            c.charges[2], c.charges[3], c.charges[4], c.charges[5], c.charges[6], c.charges[7], c.raceRacers, c.hpRacers, c.hpCops,
            c.copRacers);
 }
@@ -231,6 +232,7 @@ void Step(int dir) {
     else if (id == kRowMode) M.eventMode = (M.eventMode + dir + kEventModeCount) % kEventModeCount;
     else if (id == kRowDifficulty) M.difficulty = (M.difficulty + dir + kDifficultyCount) % kDifficultyCount;
     else if (id == kRowTime) M.time = (M.time + dir + kTimeCount) % kTimeCount;
+    else if (id == kRowTimeProgression) M.timeProgression = !M.timeProgression;
     else if (id == kRowWeather) M.weather = (M.weather + dir + kWeatherCount) % kWeatherCount;
     else if (id == kRowRacers || id == kRowCops) StepCount(id, dir);
     else if (id == kRowWeapons) M.weaponsMode = (M.weaponsMode + dir + kWeaponsModeCount) % kWeaponsModeCount;
@@ -341,7 +343,7 @@ void PromptBar(const Prompt* ps, int n, ImU32 col) {
 void MeasureLayout() {
     const float em = g_fontPx;
     char up[64], v[64];
-    const char* labels[] = {"Mode", "Time of day", "Weather", "Difficulty", "Racers", "Cops", "Weapons"};
+    const char* labels[] = {"Mode", "Time of day", "Time progression", "Weather", "Difficulty", "Racers", "Cops", "Weapons"};
     float lw = 0, vw = 0;
     for (const char* l : labels) { float t = TextW(g_fontIt, Upper(l, up, 64)); if (t > lw) lw = t; }
     for (int w = 0; w < kWeaponCount; ++w) {
@@ -438,6 +440,7 @@ void DrawMenu() {
     if (g_tab == kTabSetup) {
         Row(kRowMode, "Mode", kEventModeLabels[M.eventMode]);
         Row(kRowTime, "Time of day", kTimeNames[M.time]);
+        Row(kRowTimeProgression, "Time progression", M.timeProgression ? "On" : "Off");
         Row(kRowWeather, "Weather", kWeatherLabels[M.weather]);
         Row(kRowDifficulty, "Difficulty", kDifficultyNames[M.difficulty]);
         char r[8], c[8];
