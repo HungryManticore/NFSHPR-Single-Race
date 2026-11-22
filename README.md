@@ -34,7 +34,7 @@ Download the latest [release](../../releases). Unpack everything to the game's r
 - Pick an event from the map and accept it. You will then proceed to the car selection screen. Accept your car to start the race.
 
 # Screenshots
-<img width="1920" height="1080" alt="Screenshot (57)" src="https://github.com/user-attachments/assets/0ce98009-52a0-4150-b98a-ad61afc5f26b" />
+<img width="1920" height="1080" alt="Screenshot (98)" src="https://github.com/user-attachments/assets/f5289560-14b0-4d9e-bb1a-64ae2070d86b" />
 <img width="1920" height="1080" alt="Screenshot (74)" src="https://github.com/user-attachments/assets/66cb99b6-eded-4ffb-883d-ebc8d19843c7" />
 <img width="1920" height="1080" alt="Screenshot (75)" src="https://github.com/user-attachments/assets/e064f84b-5db0-42a0-adfd-7128def5921e" />
 <img width="1920" height="1080" alt="Screenshot (84)" src="https://github.com/user-attachments/assets/993b1987-2c1f-491a-b15e-e0cf36b4fb50" />
