@@ -32,7 +32,10 @@ struct Conditions {
     int hpCops;      // Hot Pursuit: cops, kHpMin..kHpCopsMax; hpRacers + hpCops <= kMaxAI
     int copRacers;   // Cop Hot Pursuit (v29, ini [CopHotPursuit] Racers): AI racers, kCopRacersMin..kCopRacersMax
     int timeProgression;  // v36, ini [Conditions] TimeProgression=On|Off: 1 = the clock runs as in the event, 0 = it stays at the start time
+    int weaponLevel;      // v37, ini [Weapons] Level: kWeaponLevelMin..kWeaponLevelMax, for every weapon of every competitor
 };
+// Weapon level (v37): the game's 3 upgrade levels; written into the Single Race weapon sets as Cop/RacerWeaponLevel.
+const int kWeaponLevelMin = 1, kWeaponLevelMax = 3, kDefaultWeaponLevel = 1;
 // AI count limits: 8 cars in an event (the player + 7). The Hot Pursuit events hold 6 racers and 6 cops.
 const int kMaxAI = 7, kRaceRacersMin = 1, kRaceRacersMax = 7, kHpMin = 1, kHpRacersMax = 6, kHpCopsMax = 6;
 const int kDefaultRaceRacers = 7, kDefaultHpRacers = 3, kDefaultHpCops = 4;

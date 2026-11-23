@@ -168,6 +168,10 @@ const uint32_t kSingleRaceWeaponSet = 2300100;        // AI set
 const uint32_t kSingleRacePlayerWeaponSet = 2300101;  // player set (v30)
 const uint32_t kHashWeaponSet = 0x82D52FAF, kHashWeapon = 0x5D264E2B;
 // data offsets of the set's Weapon pointers, by enum Weapon (layout of the set as built from 744442)
+// data offsets of the set's weapon levels (u32; the game uses level - 1, 0 = the player's unlocked level /
+// level 1 for AI): CopWeaponLevel ea93e8f7 and RacerWeaponLevel 47273606. Read per competitor by 0x2F0D0A0
+// (player: [manager+0x88], AI: [manager+0x48+4i] cop / [+0x68+4i] racer) when it gets its weapons.
+const uint32_t kOffCopWeaponLevel = 0x10, kOffRacerWeaponLevel = 0x40;
 const uint32_t kWeaponFieldOffset[8] = {0x38 /*RacerSpikeStrip*/, 0x30 /*RacerEMP*/, 0x20 /*Jammer*/, 0x28 /*Overdrive*/,
                                         0x08 /*CopSpikeStrip*/, 0x00 /*CopEMP*/, 0x48 /*RoadBlock*/, 0x18 /*Helicopter*/};
 typedef uint64_t (*Fn_WeaponSetLoader)(uintptr_t, uint32_t, uint32_t, uint32_t*, uint64_t);
@@ -1049,6 +1053,8 @@ const char kDefaultIni[] =
     "[Weapons]\r\n"
     "; Single Race Hot Pursuit events. Classic = no weapons for racers, cops have spike strips, roadblocks and\r\n"
     "; the helicopter. Custom = the charges below (0-5) for racers (the player included) and cops.\r\n"
+    "; Level: weapon level 1-3, for all weapons of the player, the AI racers and the cops (both Modes)\r\n"
+    "Level=1\r\n"
     "Mode=Classic\r\n"
     "RacerSpikeStrip=2\r\n"
     "RacerEMP=2\r\n"
@@ -1070,11 +1076,15 @@ const char kDefaultIni[] =
     "[MenuLabel]\r\n"
     "; Text of the main menu item that opens Single Race (the game's \"WALL\"). Read at game start.\r\n"
     "; \\n = line break (e.g. SINGLE\\nRACE). Empty = keep WALL.\r\n"
-    "Text=SINGLE RACE\r\n";
+    "Text=SINGLE RACE\r\n"
+    "\r\n"
+    "[Log]\r\n"
+    "; 1 = write NFSHPR_SingleRace.log next to the asi, 0 = no log. Read at game start.\r\n"
+    "Enabled=1\r\n";
 
 CRITICAL_SECTION g_condLock;
 Conditions g_cond = {kModeRace, kNoon, kDry, kWeaponsClassic, {2, 2, 1, 1, 2, 2, 2, 1}, VK_F5, 0, kMedium,
-                     kDefaultRaceRacers, kDefaultHpRacers, kDefaultHpCops, kDefaultCopRacers, 1};
+                     kDefaultRaceRacers, kDefaultHpRacers, kDefaultHpCops, kDefaultCopRacers, 1, kDefaultWeaponLevel};
 const int kDefaultCharges[kWeaponCount] = {2, 2, 1, 1, 2, 2, 2, 1};
 
 int NameIndex(const wchar_t* text, const char* const* names, int count, int def) {
@@ -1144,6 +1154,13 @@ void LoadConditions() {
         MultiByteToWideChar(CP_ACP, 0, kWeaponKeys[w], -1, k, 32);
         int n = (int)GetPrivateProfileIntW(L"Weapons", k, kDefaultCharges[w], g_iniPath);
         c.charges[w] = n < 0 ? 0 : n > kMaxCharges ? kMaxCharges : n;
+    }
+    // weapon level (v37; an older ini: add it)
+    if (!GetPrivateProfileStringW(L"Weapons", L"Level", L"", t, 64, g_iniPath))
+        WritePrivateProfileStringW(L"Weapons", L"Level", L"1", g_iniPath);
+    {
+        int n = (int)GetPrivateProfileIntW(L"Weapons", L"Level", kDefaultWeaponLevel, g_iniPath);
+        c.weaponLevel = n < kWeaponLevelMin ? kWeaponLevelMin : n > kWeaponLevelMax ? kWeaponLevelMax : n;
     }
     // AI count, one section per mode (an ini from before v24: add them with the defaults)
     if (!GetPrivateProfileStringW(L"Race", L"Racers", L"", t, 64, g_iniPath))
@@ -1719,7 +1736,7 @@ uintptr_t ResolveSet(uintptr_t handle, uint32_t wantId) {
     return p;
 }
 
-bool WriteCharges(uintptr_t set, const int* charges) {
+bool WriteCharges(uintptr_t set, const int* charges, int level) {
     uintptr_t data = 0;
     if (!SafeRead(set + 0x10, &data, 8) || !data) return false;
     uintptr_t subs[kWeaponCount];
@@ -1736,7 +1753,10 @@ bool WriteCharges(uintptr_t set, const int* charges) {
         SIZE_T n = 0;
         if (!WriteProcessMemory(GetCurrentProcess(), (void*)sd, &v, 4, &n) || n != 4) return false;  // Count
     }
-    return true;
+    uint32_t lv = (uint32_t)level;
+    SIZE_T n1 = 0, n2 = 0;
+    return WriteProcessMemory(GetCurrentProcess(), (void*)(data + kOffCopWeaponLevel), &lv, 4, &n1) && n1 == 4 &&
+           WriteProcessMemory(GetCurrentProcess(), (void*)(data + kOffRacerWeaponLevel), &lv, 4, &n2) && n2 == 4;
 }
 
 // SetupWeaponAvailabilityForCompetitor(i): before the first one of a Single Race Hot Pursuit, write the charges.
@@ -1756,12 +1776,12 @@ int Hook_WeaponsForCompetitor(lua_State* L) {
         if (!player && !ai) {
             Log("weapons: Single Race sets not loaded - the event's own weapons apply");
         } else {
-            bool w1 = player && WriteCharges(player, own);
-            bool w2 = ai && WriteCharges(ai, charges);
-            Log("weapons (%s): racers spike %d emp %d jammer %d turbo %d | cops spike %d emp %d roadblock %d heli %d"
+            bool w1 = player && WriteCharges(player, own, c.weaponLevel);
+            bool w2 = ai && WriteCharges(ai, charges, c.weaponLevel);
+            Log("weapons (%s, level %d): racers spike %d emp %d jammer %d turbo %d | cops spike %d emp %d roadblock %d heli %d"
                 " | player (%s side) gets its own side only%s%s%s",
-                kWeaponsModeNames[c.weaponsMode], charges[0], charges[1], charges[2], charges[3], charges[4], charges[5],
-                charges[6], charges[7], copSide ? "cop" : "racer", player ? "" : " - PLAYER SET NOT LOADED",
+                kWeaponsModeNames[c.weaponsMode], c.weaponLevel, charges[0], charges[1], charges[2], charges[3], charges[4],
+                charges[5], charges[6], charges[7], copSide ? "cop" : "racer", player ? "" : " - PLAYER SET NOT LOADED",
                 ai ? "" : " - AI SET NOT LOADED", (!player || w1) && (!ai || w2) ? "" : " - WRITE FAILED");
         }
     }
@@ -2604,6 +2624,7 @@ void SR_SetConditions(const Conditions& c) {
     g_cond.hpCops = c.hpCops;
     g_cond.copRacers = c.copRacers;
     g_cond.timeProgression = c.timeProgression;
+    g_cond.weaponLevel = c.weaponLevel;
     LeaveCriticalSection(&g_condLock);
     wchar_t w[32];
     MultiByteToWideChar(CP_ACP, 0, kEventModeNames[c.eventMode], -1, w, 32);
@@ -2617,6 +2638,8 @@ void SR_SetConditions(const Conditions& c) {
     WritePrivateProfileStringW(L"Conditions", L"TimeProgression", c.timeProgression ? L"On" : L"Off", g_iniPath);
     MultiByteToWideChar(CP_ACP, 0, kWeaponsModeNames[c.weaponsMode], -1, w, 32);
     WritePrivateProfileStringW(L"Weapons", L"Mode", w, g_iniPath);
+    _snwprintf(w, 32, L"%d", c.weaponLevel);
+    WritePrivateProfileStringW(L"Weapons", L"Level", w, g_iniPath);
     for (int i = 0; i < kWeaponCount; ++i) {
         wchar_t k[32], v[8];
         MultiByteToWideChar(CP_ACP, 0, kWeaponKeys[i], -1, k, 32);
@@ -2668,13 +2691,22 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     QueryPerformanceCounter(&q);
     g_rng = (uint64_t)q.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32) ^ 0x9E3779B97F4A7C15ULL;
     if (!g_rng) g_rng = 1;
+    // ini [Log] Enabled (v37): 0 = no log file. An existing ini from an older helper gets the key; a missing ini
+    // is written whole (with the key) by LoadSettings.
+    bool logOn = true;
+    if (GetFileAttributesW(g_iniPath) != INVALID_FILE_ATTRIBUTES) {
+        wchar_t t[16];
+        if (!GetPrivateProfileStringW(L"Log", L"Enabled", L"", t, 16, g_iniPath))
+            WritePrivateProfileStringW(L"Log", L"Enabled", L"1", g_iniPath);
+        logOn = GetPrivateProfileIntW(L"Log", L"Enabled", 1, g_iniPath) != 0;
+    }
     // appended, so a test session survives the next game start (restarted when it grows past 1 MB)
-    g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (logOn) g_log = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (g_log != INVALID_HANDLE_VALUE) {
         if (GetFileSize(g_log, nullptr) > (1u << 20)) SetEndOfFile(g_log);
         SetFilePointer(g_log, 0, nullptr, FILE_END);
     }
-    Log("---- NFSHPR Single Race helper 35 (%d cars in the class table)", kVehicleCount);
+    Log("---- NFSHPR Single Race helper 37 (%d cars in the class table)", kVehicleCount);
     HANDLE t = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     // the label search starts at once: the main menu copies its texts before the game code is unpacked
