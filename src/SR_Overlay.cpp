@@ -73,7 +73,7 @@ int g_row;      // index into the visible rows of the current tab (VisibleRows);
 enum Tab { kTabSetup, kTabWeapons, kTabCount };
 const char* const kTabNames[kTabCount] = {"Race setup", "Weapons"};
 int g_tab;
-enum { kRowTabs, kRowMode, kRowTime, kRowTimeProgression, kRowWeather, kRowDifficulty, kRowRacers, kRowCops, kRowWeapons, kRowFirstCharge };
+enum { kRowTabs, kRowMode, kRowTime, kRowTimeProgression, kRowWeather, kRowDifficulty, kRowRacers, kRowCops, kRowWeaponLevel, kRowWeapons, kRowFirstCharge };
 int VisibleRows(int* ids) {
     int n = 0;
     ids[n++] = kRowTabs;
@@ -86,6 +86,7 @@ int VisibleRows(int* ids) {
         ids[n++] = kRowRacers;
         if (M.eventMode == kModeHotPursuit) ids[n++] = kRowCops;  // Race and Cop Hot Pursuit: racers only
     } else {
+        ids[n++] = kRowWeaponLevel;
         ids[n++] = kRowWeapons;
         if (M.weaponsMode == kWeaponsCustom)
             for (int w = 0; w < kWeaponCount; ++w) ids[n++] = kRowFirstCharge + w;
@@ -192,9 +193,9 @@ void CloseMenu(bool save) {
     g_waitPadRelease = true;
     g_waitKeyRelease = true;
     Conditions c = SR_GetConditions();
-    SR_Log("conditions menu %s: %s, %s, %s (time progression %s), %s, weapons %s (racers %d %d %d %d, cops %d %d %d %d), AI: race %d racers, "
+    SR_Log("conditions menu %s: %s, %s, %s (time progression %s), %s, weapons %s level %d (racers %d %d %d %d, cops %d %d %d %d), AI: race %d racers, "
            "hot pursuit %d racers + %d cops, cop hot pursuit %d racers", save ? "saved" : "cancelled",
-           kEventModeNames[c.eventMode], kDifficultyNames[c.difficulty], kTimeNames[c.time], c.timeProgression ? "on" : "off", kWeatherNames[c.weather], kWeaponsModeNames[c.weaponsMode], c.charges[0], c.charges[1],
+           kEventModeNames[c.eventMode], kDifficultyNames[c.difficulty], kTimeNames[c.time], c.timeProgression ? "on" : "off", kWeatherNames[c.weather], kWeaponsModeNames[c.weaponsMode], c.weaponLevel, c.charges[0], c.charges[1],
            c.charges[2], c.charges[3], c.charges[4], c.charges[5], c.charges[6], c.charges[7], c.raceRacers, c.hpRacers, c.hpCops,
            c.copRacers);
 }
@@ -235,6 +236,9 @@ void Step(int dir) {
     else if (id == kRowTimeProgression) M.timeProgression = !M.timeProgression;
     else if (id == kRowWeather) M.weather = (M.weather + dir + kWeatherCount) % kWeatherCount;
     else if (id == kRowRacers || id == kRowCops) StepCount(id, dir);
+    else if (id == kRowWeaponLevel)
+        M.weaponLevel = (M.weaponLevel - kWeaponLevelMin + dir + kWeaponLevelMax - kWeaponLevelMin + 1) %
+                            (kWeaponLevelMax - kWeaponLevelMin + 1) + kWeaponLevelMin;
     else if (id == kRowWeapons) M.weaponsMode = (M.weaponsMode + dir + kWeaponsModeCount) % kWeaponsModeCount;
     else if (id >= kRowFirstCharge) {
         int& n = M.charges[id - kRowFirstCharge];
@@ -343,7 +347,7 @@ void PromptBar(const Prompt* ps, int n, ImU32 col) {
 void MeasureLayout() {
     const float em = g_fontPx;
     char up[64], v[64];
-    const char* labels[] = {"Mode", "Time of day", "Time progression", "Weather", "Difficulty", "Racers", "Cops", "Weapons"};
+    const char* labels[] = {"Mode", "Time of day", "Time progression", "Weather", "Difficulty", "Racers", "Cops", "Weapon level", "Weapons"};
     float lw = 0, vw = 0;
     for (const char* l : labels) { float t = TextW(g_fontIt, Upper(l, up, 64)); if (t > lw) lw = t; }
     for (int w = 0; w < kWeaponCount; ++w) {
@@ -454,6 +458,9 @@ void DrawMenu() {
             Row(kRowRacers, "Racers", r);
         }
     } else {
+        char lv[16];
+        sprintf(lv, "Level %d", M.weaponLevel);
+        Row(kRowWeaponLevel, "Weapon level", lv);
         Row(kRowWeapons, "Weapons", M.weaponsMode == kWeaponsCustom ? "Custom" : "Classic Hot Pursuit");
         // Custom: the ini charges, adjustable. Classic: the Classic Hot Pursuit preset, greyed out and not
         // selectable (the Custom values are kept and come back when Custom is chosen again).
