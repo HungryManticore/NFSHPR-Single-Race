@@ -13,6 +13,9 @@
 //  3. Opponents and cops (taken over from NFSHPR Event Randomizer 1.0, Single Race events only): each AI racer
 //     and cop gets a random car of the player's class (GetOpponentVehicleId), a racer stays a racer and a cop
 //     a cop. StopTraffic, the first step of every event script, starts a new event.
+//     v39: the cars are picked at that event start and written into the launched event record's opponent lists
+//     (OpponentData +0x14), so every native that reads them - spawn, the AI's name in the {racer} messages
+//     (SetAIRacerName), per-car weapon sets - sees the same car. Spawn-time picks remain only as a fallback.
 //     AI racers also get a random paint colour of their car (GetOpponentColourId; colours per car in
 //     PaintTable.h, taken from the cars' VEH_<id>_MS.BIN). Cops keep their liveries.
 //     Settings: NFSHPR_SingleRace.ini [Opponents] (re-read at every event start).
@@ -198,6 +201,14 @@ const uintptr_t kIntroSetupWriteAt = 0x262889;
 const uint8_t kIntroSetupWrite2[] = {0x49, 0x89, 0x9C, 0xCF, 0x20, 0x1C, 0x00, 0x00};
 const uintptr_t kIntroSetupWrite2At = 0x2628A3;
 const uint32_t kStartSlotArray = 0x1C20, kActorCompetitor = 0x110, kLocalCompetitorPtr = 0x89E8, kLocalCompetitor = 0x6C04;
+// v38: the player's actor index. After binding the type-0x11 actor (or an AI-list actor that is the local competitor)
+// the setup writes mgr+0x86B0 = [mgr+0xB00] - 1, the index of that actor in the pool at mgr+0x200 (stride 0x120,
+// count mgr+0xB00). The setup's caller reads it right after the setup returns (0x261992) to pick the intro's first
+// camera shot from the sequence's per-actor table ([seq+0x60]); 0x26300E reads it again later. The actor swap must
+// move it to the player's new actor, or the intro opens on the pole car (the HP2010 port's mgr+0x7930 fix).
+const uint32_t kPlayerActorIndex = 0x86B0, kActorPool = 0x200, kActorPoolCount = 0xB00, kActorStride = 0x120;
+const uint8_t kIntroSetupPlayerIdx[] = {0x41, 0x89, 0x87, 0xB0, 0x86, 0x00, 0x00};  // mov [r15+86B0h],eax
+const uintptr_t kIntroSetupPlayerIdxAt = 0x2627E6;
 typedef uint64_t (*Fn_IntroSetup)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 Fn_IntroSetup g_introSetupOriginal;
 
@@ -248,6 +259,8 @@ volatile LONG g_eventDifficulty = 1;  // Difficulty chosen in the overlay when t
 // AI racers and cops of the Single Race event most recently launched (as written into its record, or as the
 // record had them if it could not be changed)
 volatile LONG g_eventRacers = 3, g_eventCops = 4;
+// v39: the Single Race event most recently launched (0 = another event); its opponents are picked at its start
+volatile LONG g_launchedEvent = 0;
 
 uintptr_t g_base;
 wchar_t g_iniPath[MAX_PATH];
@@ -601,6 +614,8 @@ int Hook_SwitchLayoutSet(lua_State* L) {
 // Event = hash 885312e1; OpponentData lists = {pointer array, count, 8}.
 const uint32_t kHashEventRoot = 0x3F409A86, kEventRootId = 411487, kHashEvent = 0x885312E1;
 const uint32_t kOffCopCount = 0x74, kOffCopList = 0x78, kOffRacerCount = 0xFC, kOffRacerList = 0x100;
+// OpponentData (hash 1987c43d, data 0x1C bytes): +0 paint colour id, +0x14 vehicle id (v39)
+const uint32_t kHashOpponentData = 0x1987C43D, kOffOpponentVehicle = 0x14;
 // MedalData[] (field 7c7a9566): gold / silver / bronze, each {bounty, busts needed, 99, 0, time}. The cop Hot
 // Pursuit events (bundle v11) carry Crimewave's list (7 / 6 / 5 busts); the helper fits it to the racer count.
 const uint32_t kOffMedalList = 0xE8, kHashMedalData = 0x63D64900, kOffMedalBusts = 4;
@@ -888,11 +903,13 @@ int Hook_SendCommandLink(lua_State* L) {
             Log("event %u -> Single Race %s %u (mode chosen in the overlay), difficulty %s, AI %s; link \"%s\"", id,
                 ModeLabel(ModeOf(single)), single, kDifficultyNames[difficulty], ai, link);
             ApplyAICount(single, ModeOf(single), cond);
+            InterlockedExchange(&g_launchedEvent, (LONG)single);
         } else if (Blocked(id)) {
             Log("event %u: mode not offered in Single Race, ignored", id);
             return 0;
         } else {
             InterlockedExchange(&g_mode, ModeOf(id));  // career events etc.: no remapping of start slots
+            InterlockedExchange(&g_launchedEvent, 0);
         }
     }
     return g_bindings[kSendCommandLink].original(L);
@@ -955,6 +972,20 @@ void PlacePlayerLast(uintptr_t mgr) {
               WriteProcessMemory(GetCurrentProcess(), &slots[back], &a, 8, &n4);
     Log("intro setup: player (competitor %d) swapped actors with competitor %d (%.1f m back)%s", local, back,
         __builtin_sqrtf(best), ok ? "" : " - WRITE FAILED");
+    if (!ok) return;
+    // the player's actor index (camera) follows the player to its new actor
+    uint32_t count = 0;
+    int oldIdx = -1;
+    uintptr_t pool = mgr + kActorPool;
+    if (!SafeRead(mgr + kActorPoolCount, &count, 4) || !SafeRead(mgr + kPlayerActorIndex, &oldIdx, 4) || b < pool ||
+        (b - pool) % kActorStride || (b - pool) / kActorStride >= count || count > 64) {
+        Log("intro setup: player actor index not changed (count %u, index %d)", count, oldIdx);
+        return;
+    }
+    int newIdx = (int)((b - pool) / kActorStride);
+    SIZE_T n5 = 0;
+    bool ok2 = WriteProcessMemory(GetCurrentProcess(), (void*)(mgr + kPlayerActorIndex), &newIdx, 4, &n5);
+    Log("intro setup: player actor index %d -> %d%s", oldIdx, newIdx, ok2 ? "" : " - WRITE FAILED");
 }
 
 uint64_t Hook_IntroSetup(uintptr_t mgr, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
@@ -1279,8 +1310,18 @@ struct EventState {
     int slotCount;
     uint32_t playerId;
     bool playerKnown;
+    // v39: opponents picked at the event start and written into the event record (see PickOpponentsAtStart)
+    bool prePicked;
+    struct Pre { uintptr_t data; uint32_t original, chosen; } pre[16];
+    int preCount;
 };
 EventState E;
+
+// The bundle's vehicle id of every OpponentData entry the helper has changed (records stay in memory, so the
+// next launch must pick from the original car, not from the previous pick).
+struct OriginalCar { uintptr_t data; uint32_t id; };
+OriginalCar g_originalCars[1024];
+int g_originalCarCount;
 
 bool InOnlineEvent() {
     uintptr_t mgr = 0, online = 0;
@@ -1307,6 +1348,8 @@ void LearnPlayerCar(lua_State* L) {
 bool UsedThisEvent(uint32_t id) {
     for (int i = 0; i < E.slotCount; ++i)
         if (E.slots[i].chosen == id) return true;
+    for (int i = 0; i < E.preCount; ++i)
+        if (E.pre[i].chosen == id) return true;
     return false;
 }
 
@@ -1323,6 +1366,7 @@ uint32_t PickReplacement(uint32_t original) {
         for (int i = 0; i < kVehicleCount && n < 64; ++i) {
             const Vehicle* v = &kVehicles[i];
             if (v->side != o->side || v->tier != tier || Excluded(v->id)) continue;
+            if (p && v->id == p->id) continue;
             if (S.avoidPlayerModel && p && lstrcmpA(v->name, p->name) == 0) continue;
             if (pass == 0 && S.avoidDuplicates && UsedThisEvent(v->id)) continue;
             pool[n++] = v;
@@ -1332,16 +1376,87 @@ uint32_t PickReplacement(uint32_t original) {
     return pool[RandBelow((unsigned)n)]->id;
 }
 
+// The player's car at the event start, without touching the caller's Lua stack.
+void LearnPlayerCarKeepStack(lua_State* L) {
+    if (E.playerKnown) return;
+    int top = lua_gettop_(L);
+    int n = g_origGetSelectedVehicleId(L);
+    if (n >= 1 && lua_type_(L, -1) == LUA_TNUMBER) {
+        E.playerId = (uint32_t)lua_tonumber_(L, -1);
+        E.playerKnown = true;
+        const Vehicle* v = FindVehicle(E.playerId);
+        Log("player car: %u %s [%s %s]", E.playerId, VName(v), v ? (v->side == 3 ? "cop" : "racer") : "?", ClassName(v));
+    }
+    lua_settop_(L, top);
+}
+
+uint32_t OriginalCarOf(uintptr_t data, uint32_t current) {
+    for (int i = 0; i < g_originalCarCount; ++i)
+        if (g_originalCars[i].data == data) return g_originalCars[i].id;
+    if (g_originalCarCount < (int)(sizeof(g_originalCars) / sizeof(g_originalCars[0])))
+        g_originalCars[g_originalCarCount++] = OriginalCar{data, current};
+    return current;
+}
+
+// v39. Every native that needs an AI's car reads it from the event record's opponent lists (OpponentData +0x14,
+// through 0x28DB70): GetOpponentVehicleId (spawn), SetAIRacerName (the name in "{racer} FINISHED 1ST" and the other
+// {racer} messages, via Primitive SetAICompetitorRaceName), the per-car weapon set, ... So the randomizer now
+// picks the cars here, at the event start (StopTraffic comes before PlaceCarForCutscene and
+// SetAICompetitorRaceName), and writes them into the launched record's racer and cop lists. Entries keep their
+// bundle car when randomizing that side is off.
+void PickOpponentsAtStart(lua_State* L) {
+    E.prePicked = false;
+    E.preCount = 0;
+    uint32_t ev = (uint32_t)g_launchedEvent;
+    uintptr_t p = ev ? FindEventRecord(ev) : 0;
+    if (!p) {
+        Log("opponents: event %u not found in memory - cars are picked when they spawn (names stay the bundle's)", ev);
+        return;
+    }
+    LearnPlayerCarKeepStack(L);
+    uintptr_t d = p + 0x30;
+    const struct { uint32_t off; const char* what; } lists[2] = {{kOffRacerList, "racer"}, {kOffCopList, "cop"}};
+    for (int l = 0; l < 2; ++l) {
+        uintptr_t arr = 0;
+        uint32_t count = 0, es = 0;
+        if (!SafeRead(d + lists[l].off, &arr, 8) || !SafeRead(d + lists[l].off + 8, &count, 4) ||
+            !SafeRead(d + lists[l].off + 12, &es, 4) || !arr || es != 8 || count > 8)
+            continue;
+        for (uint32_t k = 0; k < count && E.preCount < 16; ++k) {
+            uintptr_t e = 0;
+            if (!SafeRead(arr + 8 * (uintptr_t)k, &e, 8) || !Instance(e, kHashOpponentData, nullptr)) {
+                Log("opponents: %s %u of event %u is not OpponentData - left as it is", lists[l].what, k, ev);
+                continue;
+            }
+            uintptr_t data = e + 0x30;
+            uint32_t current = 0;
+            if (!SafeRead(data + kOffOpponentVehicle, &current, 4)) continue;
+            uint32_t original = OriginalCarOf(data, current);
+            uint32_t chosen = PickReplacement(original);
+            bool ok = chosen == current || WriteMem((void*)(data + kOffOpponentVehicle), &chosen, 4);
+            E.pre[E.preCount++] = EventState::Pre{data, original, ok ? chosen : current};
+            const Vehicle* o = FindVehicle(original);
+            const Vehicle* c = FindVehicle(chosen);
+            Log("opponents: %s %u: %u %s [%s] -> %u %s [%s]%s", lists[l].what, k, original, VName(o), ClassName(o), chosen,
+                VName(c), ClassName(c), ok ? "" : " - WRITE FAILED");
+        }
+    }
+    E.prePicked = true;
+}
+
 int Hook_StopTraffic(lua_State* L) {
     ++E.number;
     E.slotCount = 0;
     E.playerKnown = false;
     E.playerId = 0;
+    E.prePicked = false;
+    E.preCount = 0;
     E.singleRace = g_mode != kNone;
     if (E.singleRace) {
         LoadSettings();
         Log("---- event %d loading (Single Race %s): RandomizeRacers=%d RandomizeCops=%d MatchPlayerClass=%d RandomizeRacerColours=%d", E.number,
             ModeLabel(g_mode), S.racers, S.cops, S.matchClass, S.racerColours);
+        if (!InOnlineEvent()) PickOpponentsAtStart(L);
     }
     return g_bindings[kStopTraffic].original(L);
 }
@@ -1353,6 +1468,15 @@ int Hook_GetOpponentVehicleId(lua_State* L) {
     if (!E.singleRace || n < 1 || lua_type_(L, -1) != LUA_TNUMBER) return n;
     uint32_t original = (uint32_t)lua_tonumber_(L, -1);
     if (InOnlineEvent()) return n;
+    if (E.prePicked) {
+        // the car was picked at the event start and is already in the record: only note it for the colour
+        for (int i = 0; i < E.slotCount; ++i)
+            if (E.slots[i].competitor == competitor && E.slots[i].chosen == original) return n;
+        if (E.slotCount < 64) E.slots[E.slotCount++] = Slot{competitor, original, original, 0};
+        const Vehicle* v = FindVehicle(original);
+        Log("competitor %d: %u %s [%s] (picked at the event start)", competitor, original, VName(v), ClassName(v));
+        return n;
+    }
     // Same competitor and same original car in this event -> same answer (spawn, cutscene, redeploy).
     for (int i = 0; i < E.slotCount; ++i) {
         Slot& sl = E.slots[i];
@@ -1851,7 +1975,8 @@ bool Install(Binding& b, int slot) {
 bool InstallIntroSetupHook() {
     if (!CheckBytes(kRvaIntroSetup, kIntroSetupPrologue, sizeof(kIntroSetupPrologue)) ||
         !CheckBytes(kIntroSetupWriteAt, kIntroSetupWrite, sizeof(kIntroSetupWrite)) ||
-        !CheckBytes(kIntroSetupWrite2At, kIntroSetupWrite2, sizeof(kIntroSetupWrite2))) {
+        !CheckBytes(kIntroSetupWrite2At, kIntroSetupWrite2, sizeof(kIntroSetupWrite2)) ||
+        !CheckBytes(kIntroSetupPlayerIdxAt, kIntroSetupPlayerIdx, sizeof(kIntroSetupPlayerIdx))) {
         Log("race intro setup: game code differs from the analysed build");
         return false;
     }
@@ -2706,7 +2831,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         if (GetFileSize(g_log, nullptr) > (1u << 20)) SetEndOfFile(g_log);
         SetFilePointer(g_log, 0, nullptr, FILE_END);
     }
-    Log("---- NFSHPR Single Race helper 37 (%d cars in the class table)", kVehicleCount);
+    Log("---- NFSHPR Single Race helper 39 (%d cars in the class table)", kVehicleCount);
     HANDLE t = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     // the label search starts at once: the main menu copies its texts before the game code is unpacked
