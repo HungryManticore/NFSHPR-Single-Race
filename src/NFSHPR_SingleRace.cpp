@@ -198,6 +198,14 @@ const uintptr_t kIntroSetupWriteAt = 0x262889;
 const uint8_t kIntroSetupWrite2[] = {0x49, 0x89, 0x9C, 0xCF, 0x20, 0x1C, 0x00, 0x00};
 const uintptr_t kIntroSetupWrite2At = 0x2628A3;
 const uint32_t kStartSlotArray = 0x1C20, kActorCompetitor = 0x110, kLocalCompetitorPtr = 0x89E8, kLocalCompetitor = 0x6C04;
+// v38: the player's actor index. After binding the type-0x11 actor (or an AI-list actor that is the local competitor)
+// the setup writes mgr+0x86B0 = [mgr+0xB00] - 1, the index of that actor in the pool at mgr+0x200 (stride 0x120,
+// count mgr+0xB00). The setup's caller reads it right after the setup returns (0x261992) to pick the intro's first
+// camera shot from the sequence's per-actor table ([seq+0x60]); 0x26300E reads it again later. The actor swap must
+// move it to the player's new actor, or the intro opens on the pole car (the HP2010 port's mgr+0x7930 fix).
+const uint32_t kPlayerActorIndex = 0x86B0, kActorPool = 0x200, kActorPoolCount = 0xB00, kActorStride = 0x120;
+const uint8_t kIntroSetupPlayerIdx[] = {0x41, 0x89, 0x87, 0xB0, 0x86, 0x00, 0x00};  // mov [r15+86B0h],eax
+const uintptr_t kIntroSetupPlayerIdxAt = 0x2627E6;
 typedef uint64_t (*Fn_IntroSetup)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 Fn_IntroSetup g_introSetupOriginal;
 
@@ -955,6 +963,20 @@ void PlacePlayerLast(uintptr_t mgr) {
               WriteProcessMemory(GetCurrentProcess(), &slots[back], &a, 8, &n4);
     Log("intro setup: player (competitor %d) swapped actors with competitor %d (%.1f m back)%s", local, back,
         __builtin_sqrtf(best), ok ? "" : " - WRITE FAILED");
+    if (!ok) return;
+    // the player's actor index (camera) follows the player to its new actor
+    uint32_t count = 0;
+    int oldIdx = -1;
+    uintptr_t pool = mgr + kActorPool;
+    if (!SafeRead(mgr + kActorPoolCount, &count, 4) || !SafeRead(mgr + kPlayerActorIndex, &oldIdx, 4) || b < pool ||
+        (b - pool) % kActorStride || (b - pool) / kActorStride >= count || count > 64) {
+        Log("intro setup: player actor index not changed (count %u, index %d)", count, oldIdx);
+        return;
+    }
+    int newIdx = (int)((b - pool) / kActorStride);
+    SIZE_T n5 = 0;
+    bool ok2 = WriteProcessMemory(GetCurrentProcess(), (void*)(mgr + kPlayerActorIndex), &newIdx, 4, &n5);
+    Log("intro setup: player actor index %d -> %d%s", oldIdx, newIdx, ok2 ? "" : " - WRITE FAILED");
 }
 
 uint64_t Hook_IntroSetup(uintptr_t mgr, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
@@ -1851,7 +1873,8 @@ bool Install(Binding& b, int slot) {
 bool InstallIntroSetupHook() {
     if (!CheckBytes(kRvaIntroSetup, kIntroSetupPrologue, sizeof(kIntroSetupPrologue)) ||
         !CheckBytes(kIntroSetupWriteAt, kIntroSetupWrite, sizeof(kIntroSetupWrite)) ||
-        !CheckBytes(kIntroSetupWrite2At, kIntroSetupWrite2, sizeof(kIntroSetupWrite2))) {
+        !CheckBytes(kIntroSetupWrite2At, kIntroSetupWrite2, sizeof(kIntroSetupWrite2)) ||
+        !CheckBytes(kIntroSetupPlayerIdxAt, kIntroSetupPlayerIdx, sizeof(kIntroSetupPlayerIdx))) {
         Log("race intro setup: game code differs from the analysed build");
         return false;
     }
@@ -2706,7 +2729,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         if (GetFileSize(g_log, nullptr) > (1u << 20)) SetEndOfFile(g_log);
         SetFilePointer(g_log, 0, nullptr, FILE_END);
     }
-    Log("---- NFSHPR Single Race helper 37 (%d cars in the class table)", kVehicleCount);
+    Log("---- NFSHPR Single Race helper 38 (%d cars in the class table)", kVehicleCount);
     HANDLE t = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     // the label search starts at once: the main menu copies its texts before the game code is unpacked
