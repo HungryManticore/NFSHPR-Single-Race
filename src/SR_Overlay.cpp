@@ -13,6 +13,8 @@
 // * Its own controller-friendly menu in two tabs (Race setup, Weapons): up/down picks the row (row 0 is the
 //   tab bar), left/right changes it (on the tab bar: switches tabs), LB / RB switch tabs from any row,
 //   A / Enter saves and closes, B / Esc cancels and closes.
+// v40 ("hook later"): no hooks at start-up; the DirectInput, XInput and Direct3D 11 hooks are installed the first time
+//   the Single Race picker is shown (OverlayStarter), with the other threads paused while XInput's code is patched.
 // v28: the game's own fonts (traced from UI\FONTS: 535957 italic for tab and option names, 368865 for values and
 //   prompts) and the game's button-prompt glyphs, embedded in SR_Assets.h. Prompts follow the last device used:
 //   a newly pressed keyboard key switches them to keyboard keycaps, a pad button / trigger / stick to the controller.
@@ -20,6 +22,7 @@
 #include "SR_Shared.h"
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <tlhelp32.h>
 #include <float.h>
 #include <stdio.h>
 #include <string.h>
@@ -143,9 +146,10 @@ DWORD WINAPI Hook_XInputGetStateEx(DWORD idx, XState* s) { return Filter(idx, g_
 
 // Overwrites the start of fn with "mov rax, hook; jmp rax". The original is never called (the real state
 // comes from another XInput DLL), so no instructions need to be relocated.
+const int kRedirectLen = 12;
 bool Redirect(void* fn, void* hook) {
     if (!fn) return false;
-    uint8_t p[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
+    uint8_t p[kRedirectLen] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
     uintptr_t h = (uintptr_t)hook;
     memcpy(p + 2, &h, 8);
     DWORD old;
@@ -154,6 +158,48 @@ bool Redirect(void* fn, void* hook) {
     VirtualProtect(fn, sizeof(p), old, &old);
     FlushInstructionCache(GetCurrentProcess(), fn, sizeof(p));
     return true;
+}
+
+// v40: the XInput functions are patched while the game is running (on the picker) and may be polling the pad on
+// another thread, so every other thread is suspended for the patch (as MinHook does), and the patch is retried if a
+// thread was stopped inside the bytes being replaced. Nothing that takes a lock (no logging, no heap) runs while the
+// threads are suspended. Returns the number of attempts used, 0 if no safe moment was found.
+HANDLE g_frozen[1024];
+int g_frozenCount;
+void ThawAll() {
+    for (int i = 0; i < g_frozenCount; ++i) {
+        ResumeThread(g_frozen[i]);
+        CloseHandle(g_frozen[i]);
+    }
+    g_frozenCount = 0;
+}
+// Suspends every other thread of the process; false if one of them is executing inside [a, a+len) or [b, b+len).
+bool FreezeOthers(uintptr_t a, uintptr_t b) {
+    g_frozenCount = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    DWORD pid = GetCurrentProcessId(), self = GetCurrentThreadId();
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    bool clear = true;
+    for (BOOL ok = Thread32First(snap, &te); ok && clear; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        if (g_frozenCount >= (int)(sizeof(g_frozen) / sizeof(g_frozen[0]))) { clear = false; break; }
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        if (SuspendThread(t) == (DWORD)-1) { CloseHandle(t); continue; }
+        g_frozen[g_frozenCount++] = t;
+        alignas(16) CONTEXT ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(t, &ctx)) {
+            uintptr_t ip = (uintptr_t)ctx.Rip;
+            if ((a && ip >= a && ip < a + kRedirectLen) || (b && ip >= b && ip < b + kRedirectLen)) clear = false;
+        }
+    }
+    CloseHandle(snap);
+    if (!clear) ThawAll();
+    return clear;
 }
 
 void HookXInput() {
@@ -168,9 +214,21 @@ void HookXInput() {
     }
     if (!g_realGetState) { SR_Log("overlay: no second XInput DLL - controller not available for the menu"); return; }
     if (!g_realGetStateEx) g_realGetStateEx = g_realGetState;
-    bool a = Redirect((void*)GetProcAddress(game, "XInputGetState"), (void*)Hook_XInputGetState);
-    bool b = Redirect((void*)GetProcAddress(game, (LPCSTR)100), (void*)Hook_XInputGetStateEx);
-    SR_Log("overlay: XInput hooked (XInputGetState %s, XInputGetStateEx %s)", a ? "yes" : "no", b ? "yes" : "no");
+    void* fa = (void*)GetProcAddress(game, "XInputGetState");
+    void* fb = (void*)GetProcAddress(game, (LPCSTR)100);
+    int tries = 0;
+    bool frozen = false;
+    while (tries < 50 && !(frozen = FreezeOthers((uintptr_t)fa, (uintptr_t)fb))) { ++tries; Sleep(1); }
+    if (!frozen) {
+        SR_Log("overlay: XInput not hooked (no safe moment to patch it) - controller not available for the menu");
+        return;
+    }
+    int threads = g_frozenCount;
+    bool a = Redirect(fa, (void*)Hook_XInputGetState);
+    bool b = Redirect(fb, (void*)Hook_XInputGetStateEx);
+    ThawAll();
+    SR_Log("overlay: XInput hooked (XInputGetState %s, XInputGetStateEx %s; %d other threads paused for the patch, %d retries)",
+           a ? "yes" : "no", b ? "yes" : "no", threads, tries);
 }
 
 // ====================================================================== the menu
@@ -952,10 +1010,27 @@ bool HookD3D() {
 
 void SR_RequestMenu() { InterlockedExchange(&g_menuRequest, 1); }
 
-void Overlay_Start() {
-    InitializeCriticalSection(&g_imguiLock);
+// v40 ("hook later"): nothing is hooked at start-up. The input and Direct3D hooks (and the throw-away D3D11 device and
+// window used to find the Present vtable) are installed by this thread the first time the Single Race picker is on
+// screen, so the game boots, plays its splash screens and builds the main menu with no overlay code in its rendering
+// or input. ImGui itself starts at the first frame after that (on the picker).
+DWORD WINAPI OverlayStarter(LPVOID) {
+    while (!SR_PickerVisible()) Sleep(100);
+    SR_Log("overlay: Single Race picker on screen - installing the input and Direct3D hooks");
     HookDirectInput();
     HookXInput();
-    if (HookD3D()) SR_Log("overlay: Direct3D 11 Present hooked, waiting for the first frame");
+    if (HookD3D()) SR_Log("overlay: Direct3D 11 Present hooked, waiting for the next frame");
     else SR_Log("overlay: could not hook Direct3D 11 - the conditions menu is unavailable (the ini still works)");
+    return 0;
+}
+
+void Overlay_Start() {
+    InitializeCriticalSection(&g_imguiLock);
+    HANDLE t = CreateThread(nullptr, 0, OverlayStarter, nullptr, 0, nullptr);
+    if (!t) {
+        SR_Log("overlay: could not start - the conditions menu is unavailable (the ini still works)");
+        return;
+    }
+    CloseHandle(t);
+    SR_Log("overlay: waiting for the Single Race picker (no input or Direct3D hooks until then)");
 }
