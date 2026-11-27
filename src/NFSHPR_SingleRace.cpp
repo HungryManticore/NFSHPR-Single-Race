@@ -26,6 +26,7 @@
 //     (646187 / 646284) is the current layout set (SwitchLayoutSet).
 //  5. Main menu label: the Wall item's text (localised string 1263478, "WALL") is replaced in the loaded
 //     language table by the ini text ([MenuLabel] Text, default "SINGLE RACE"; see the label section below).
+//     v41: hooked in the game's LanguageManager load step instead of searched for in memory.
 //  5. Weapons (Hot Pursuit only; the offline Race script sets up no weapons). The event's weapon availability
 //     sets are replaced by the Single Race sets in update\GAMELOGIC\WEAPONS.BNDL: 2300101 for the player and
 //     2300100 for every AI. The charges chosen in the overlay (Classic or Custom) are written into them before
@@ -450,10 +451,10 @@ struct EventList {
     uint32_t count;   // original
     uint32_t ids[64]; // original order
     uint32_t keep;    // Race / Hot Pursuit entries
+    bool filtered;    // the Single Race entries are written over it now
 };
-EventList g_lists[kOnlineListCount];
-volatile LONG g_listsFound;    // 0 = not searched, 1 = found, -1 = searching / not found
-volatile LONG g_listsFiltered;
+EventList g_lists[kOnlineListCount];  // v42: filled one by one as the picker reads them (array != 0 = captured)
+volatile LONG g_listsFiltered;        // the picker wants the Single Race entries
 CRITICAL_SECTION g_listLock;
 
 // The picker lists each event once, as its Single Race Race id (kPickerLists in RouteMap.h: the multiplayer routes
@@ -481,93 +482,117 @@ bool ReadList(uintptr_t p, uint32_t listId, EventList& L) {
     return true;
 }
 
-// Searches the game's memory once for the 12 list records ([P+0x18] = hash, [P+0x1C] = id, [P+0x10] = P+0x30).
-DWORD WINAPI FindListsThread(LPVOID) {
-    ULONGLONG t0 = GetTickCount64();
-    EventList found[kOnlineListCount];
-    memset(found, 0, sizeof(found));
-    int n = 0;
-    const size_t kChunk = 1 << 20;
-    uint8_t* buf = (uint8_t*)VirtualAlloc(nullptr, kChunk + 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)&FindListsThread, &self);
-    MEMORY_BASIC_INFORMATION mbi;
-    for (uintptr_t a = 0x10000; buf && n < (int)kOnlineListCount && VirtualQuery((void*)a, &mbi, sizeof(mbi)) == sizeof(mbi);
-         a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
-        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_NOCACHE | PAGE_WRITECOMBINE)) ||
-            mbi.Type == MEM_IMAGE)
-            continue;
-        if (!(mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE))) continue;
-        uintptr_t base = (uintptr_t)mbi.BaseAddress, end = base + mbi.RegionSize;
-        for (uintptr_t c = base; c < end && n < (int)kOnlineListCount; c += kChunk) {
-            size_t len = end - c < kChunk ? end - c : kChunk;
-            SIZE_T got = 0;
-            if (!ReadProcessMemory(GetCurrentProcess(), (void*)c, buf, len, &got) || got < 8) continue;
-            for (size_t i = 0; i + 8 <= got; i += 8) {  // the record may start in the previous chunk: read via SafeRead
-                if (*(uint32_t*)(buf + i) != kHashEventList) continue;
-                uint32_t id = *(uint32_t*)(buf + i + 4);
-                if (id < kFirstOnlineList || id >= kFirstOnlineList + kOnlineListCount) continue;
-                EventList& L = found[id - kFirstOnlineList];
-                if (L.array) continue;
-                if (ReadList(c + i - 0x18, id, L)) ++n;
-            }
-        }
-    }
-    if (buf) VirtualFree(buf, 0, MEM_RELEASE);
-    EnterCriticalSection(&g_listLock);
-    if (n == (int)kOnlineListCount) {
-        memcpy(g_lists, found, sizeof(found));
-        InterlockedExchange(&g_listsFound, 1);
-    } else {
-        InterlockedExchange(&g_listsFound, 0);  // try again later
-    }
-    LeaveCriticalSection(&g_listLock);
-    int keep = 0, total = 0;
-    for (auto& L : found) { keep += L.keep; total += L.count; }
-    Log("event lists: %d of %u found in %llu ms (%d Single Race entries, %d online entries)", n, kOnlineListCount,
-        (unsigned long long)(GetTickCount64() - t0), keep, total);
-    return 0;
+// v42: no memory search. The location view model's property getter 0x32F1F0 (rcx view model, rdx location handle,
+// r9 request with the property count at +0x40, 5th argument = property index) reads the location's event list through
+// the location record's field 21fb2d82 (a handle to the list record) before it serves Events[i] / NumEvents. A stub at
+// its entry passes the handle, the request and the index to OnLocation, which captures that location's list the first
+// time (and writes the Single Race entries over it at once while the picker wants them), then lets the getter run.
+bool WriteMem(void* dst, const void* src, size_t n);
+bool FilterList(EventList& L, bool filter);
+
+const uintptr_t kRvaLocationGetter = 0x32F1F0;
+const uint8_t kLocationGetterPrologue[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x70, 0x10};  // 11 stolen
+const uintptr_t kLocationGetterCheckAt = 0x32F228;   // movsx eax, byte [r9+40h]; mov r15, rcx; cmp r14d, eax
+const uint8_t kLocationGetterCheck[] = {0x41, 0x0F, 0xBE, 0x41, 0x40, 0x4C, 0x8B, 0xF9, 0x44, 0x3B, 0xF0};
+const uintptr_t kLocationGetterReadAt = 0x32F239;    // mov rax, [rdx]; mov ebx, [rdx+8]; mov edx, 21fb2d82h
+const uint8_t kLocationGetterRead[] = {0x48, 0x8B, 0x02, 0x8B, 0x5A, 0x08, 0xBA, 0x82, 0x2D, 0xFB, 0x21};
+const uint32_t kFieldLocationEventList = 0x21FB2D82;
+
+// game UI thread only
+uintptr_t g_locSeen[32];   // location instances already handled
+int g_locSeenCount;
+
+// A handle {resource, u32 offset} -> the instance: [resource+0x28] + offset (the game's own computation).
+inline uintptr_t HandleInstance(uintptr_t h) { return *(uintptr_t*)(*(uintptr_t*)h + 0x28) + *(uint32_t*)(h + 8); }
+
+// The offset of field `hash` in the instance's data (schema = the instance's first handle; 0x14-byte field entries:
+// hash, ..., +0xC offset), as the game's lookup 0x5DD8B0 does it. -1 if the schema has no such field.
+int64_t FieldOffset(uintptr_t inst, uint32_t hash) {
+    uintptr_t schema = HandleInstance(inst);
+    int n = *(int*)(schema + 0x10);
+    uintptr_t e = *(uintptr_t*)(schema + 8);
+    for (int i = 0; i < n; ++i, e += 0x14)
+        if (*(uint32_t*)e == hash) return *(uint32_t*)(e + 0xC);
+    return -1;
 }
 
-void StartListSearch() {
-    if (InterlockedCompareExchange(&g_listsFound, -1, 0) != 0) return;  // found, or a search is running
-    HANDLE t = CreateThread(nullptr, 0, FindListsThread, nullptr, 0, nullptr);
-    if (t) CloseHandle(t);
-    else InterlockedExchange(&g_listsFound, 0);
+void CaptureList(uintptr_t p) {
+    uint32_t id = 0;
+    uintptr_t d = 0;
+    uint32_t h[2] = {};
+    if (!p || (p & 7) || !SafeRead(p + 0x10, &d, 8) || d != p + 0x30 || !SafeRead(p + 0x18, h, 8) || h[0] != kHashEventList)
+        return;
+    id = h[1];
+    if (id < kFirstOnlineList || id >= kFirstOnlineList + kOnlineListCount) return;
+    EnterCriticalSection(&g_listLock);
+    EventList& L = g_lists[id - kFirstOnlineList];
+    if (!L.array) {
+        EventList n;
+        memset(&n, 0, sizeof(n));
+        if (ReadList(p, id, n)) {
+            L = n;
+            int captured = 0;
+            for (const EventList& x : g_lists) captured += x.array != 0;
+            Log("event lists: list %u captured (%u entries, %u Single Race) - %d of %u", id, L.count, L.keep, captured, kOnlineListCount);
+            if (g_listsFiltered) FilterList(L, true);
+        }
+    }
+    LeaveCriticalSection(&g_listLock);
 }
+
+extern "C" void OnLocation(uintptr_t locHandle, uintptr_t request, int index) {
+    // the getter reads the handle only for a property index below the request's count: so do we
+    if (!locHandle || !request || index >= (int)*(int8_t*)(request + 0x40)) return;
+    uintptr_t loc = HandleInstance(locHandle);
+    for (int i = 0; i < g_locSeenCount; ++i)
+        if (g_locSeen[i] == loc) return;
+    if (g_locSeenCount < (int)(sizeof(g_locSeen) / sizeof(g_locSeen[0]))) g_locSeen[g_locSeenCount++] = loc;
+    int64_t off = FieldOffset(loc, kFieldLocationEventList);
+    if (off < 0) return;
+    uintptr_t listHandle = *(uintptr_t*)(loc + 0x10) + (uintptr_t)off;
+    uintptr_t res = 0, inst = 0;
+    uint32_t o = 0;
+    if (!SafeRead(listHandle, &res, 8) || !SafeRead(listHandle + 8, &o, 4) || !res || !SafeRead(res + 0x28, &inst, 8) || !inst)
+        return;
+    CaptureList(inst + o);
+}
+
 
 bool WriteMem(void* dst, const void* src, size_t n) {
     SIZE_T done = 0;
     return WriteProcessMemory(GetCurrentProcess(), dst, src, n, &done) && done == n;
 }
 
-// filter = true: the kept Races first, count shortened. false: the original list. Only acts on a state change.
-void SetListsFiltered(bool filter) {
-    if (g_listsFound != 1) {
-        if (filter) Log("event lists: not found yet - the picker shows every mode");
-        return;
+// One list: filter = true writes the Single Race entries over it and shortens the count; false puts the original
+// back. Only if it is still the list we read (count and first entry as we left them). Caller holds g_listLock.
+bool FilterList(EventList& L, bool filter) {
+    if (!L.array || L.filtered == filter) return true;
+    uint32_t cnt = 0, first = 0;
+    uint32_t expectCnt = L.filtered ? L.keep : L.count;
+    if (!SafeRead((uintptr_t)L.countAt, &cnt, 4) || cnt != expectCnt || !SafeRead(L.array, &first, 4)) return false;
+    bool ok;
+    if (filter) {
+        if (!L.keep) return false;   // no layout for this list (never: checked at build time)
+        ok = WriteMem((void*)L.array, L.single->ids, 4 * L.keep) && WriteMem(L.countAt, &L.keep, 4);
+    } else {
+        ok = WriteMem((void*)L.array, L.ids, 4 * L.count) && WriteMem(L.countAt, &L.count, 4);
     }
+    if (ok) L.filtered = filter;
+    return ok;
+}
+
+// filter = true: every captured list gets the Single Race entries (lists captured later get them as they are
+// captured); false: the original lists. Only acts on a state change.
+void SetListsFiltered(bool filter) {
     EnterCriticalSection(&g_listLock);
     if ((g_listsFiltered != 0) != filter) {
-        bool ok = true;
-        for (EventList& L : g_lists) {
-            // still the list we read? (count and first entry unchanged)
-            uint32_t cnt = 0, first = 0;
-            uint32_t expectCnt = g_listsFiltered ? L.keep : L.count;
-            if (!SafeRead((uintptr_t)L.countAt, &cnt, 4) || cnt != expectCnt || !SafeRead(L.array, &first, 4)) {
-                ok = false;
-                continue;
-            }
-            if (filter) {
-                if (!L.keep) { ok = false; continue; }   // no layout for this list (never: checked at build time)
-                ok &= WriteMem((void*)L.array, L.single->ids, 4 * L.keep) && WriteMem(L.countAt, &L.keep, 4);
-            } else {
-                ok &= WriteMem((void*)L.array, L.ids, 4 * L.count) && WriteMem(L.countAt, &L.count, 4);
-            }
-        }
         InterlockedExchange(&g_listsFiltered, filter ? 1 : 0);
-        Log("event lists %s%s", filter ? "replaced by the Single Race events (Career starting points)" : "restored", ok ? "" : " (some lists changed - skipped)");
+        bool ok = true;
+        int n = 0;
+        for (EventList& L : g_lists)
+            if (L.array) { ok &= FilterList(L, filter); ++n; }
+        Log("event lists %s (%d captured)%s", filter ? "replaced by the Single Race events (Career starting points)" : "restored", n,
+            ok ? "" : " (some lists changed - skipped)");
     }
     LeaveCriticalSection(&g_listLock);
 }
@@ -597,8 +622,7 @@ int Hook_SwitchLayoutSet(lua_State* L) {
             LONG id = (LONG)lua_tonumber_(L, 1);
             InterlockedExchange(&g_layoutSet, id);
             if (id == kLayoutMainMenu) {
-                StartListSearch();         // first visit: find the lists in the background
-                StartEventRootSearch();    // and the event records (AI count)
+                StartEventRootSearch();    // the event records (AI count): read from the game's challenge database
                 SetListsFiltered(false);   // main menu: online lobby and career see the full lists
                 RestorePlayerSide();       // and the career map its side
             } else if (g_offlinePageIsWall && (id == kLayoutLocations || id == kLayoutEvents)) {
@@ -621,7 +645,6 @@ const uint32_t kHashOpponentData = 0x1987C43D, kOffOpponentVehicle = 0x14;
 const uint32_t kOffMedalList = 0xE8, kHashMedalData = 0x63D64900, kOffMedalBusts = 4;
 
 volatile uintptr_t g_eventRoot;   // the root instance, once found
-volatile LONG g_rootSearch;       // 1 while a background search runs
 
 bool Instance(uintptr_t p, uint32_t hash, uint32_t* id) {
     uintptr_t d = 0;
@@ -639,63 +662,51 @@ bool RootList(uintptr_t root, uintptr_t* arr, uint32_t* count) {
     return *arr && es == 8 && *count > 0 && *count < 8192;
 }
 
-// Searches readable private memory for the root ([P+0x18] = hash, [P+0x1C] = 411487).
-uintptr_t ScanForEventRoot() {
-    const size_t kChunk = 1 << 20;
-    uint8_t* buf = (uint8_t*)VirtualAlloc(nullptr, kChunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    uintptr_t found = 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    for (uintptr_t a = 0x10000; buf && !found && VirtualQuery((void*)a, &mbi, sizeof(mbi)) == sizeof(mbi);
-         a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
-        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_NOCACHE | PAGE_WRITECOMBINE)) ||
-            mbi.Type == MEM_IMAGE || !(mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
-            continue;
-        uintptr_t base = (uintptr_t)mbi.BaseAddress, end = base + mbi.RegionSize;
-        for (uintptr_t c = base; c < end && !found; c += kChunk) {
-            size_t len = end - c < kChunk ? end - c : kChunk;
-            SIZE_T got = 0;
-            if (!ReadProcessMemory(GetCurrentProcess(), (void*)c, buf, len, &got) || got < 8) continue;
-            for (size_t i = 0; i + 8 <= got; i += 8) {
-                if (*(uint32_t*)(buf + i) != kHashEventRoot || *(uint32_t*)(buf + i + 4) != kEventRootId) continue;
-                uintptr_t arr;
-                uint32_t n;
-                if (c + i >= 0x18 && RootList(c + i - 0x18, &arr, &n)) { found = c + i - 0x18; break; }
-            }
-        }
-    }
-    if (buf) VirtualFree(buf, 0, MEM_RELEASE);
-    return found;
+// v42: no memory search. The game's challenge database is at game manager + 0x1ED40 (0x2904D4); its event lookup
+// 0x233590 needs state [db] == 3 and takes the root from the handle at db+0x4B78 (resource) / db+0x4B80 (offset):
+// root = [resource+0x28] + offset. The code bytes that show these offsets are checked at start-up.
+const uintptr_t kOffChallengeDb = 0x1ED40, kOffChallengeDbRoot = 0x4B78;
+const uintptr_t kChallengeDbStateAt = 0x23359F;   // cmp dword [rcx], 3
+const uint8_t kChallengeDbState[] = {0x83, 0x39, 0x03};
+const uintptr_t kChallengeDbRootAt = 0x2335D5;    // mov rax, [rdi+4B78h]; mov r8d, [rdi+4B80h]
+const uint8_t kChallengeDbRoot[] = {0x48, 0x8B, 0x87, 0x78, 0x4B, 0x00, 0x00, 0x44, 0x8B, 0x87, 0x80, 0x4B, 0x00, 0x00};
+bool g_challengeDbOk;   // set at start-up when the bytes match
+
+uintptr_t ReadEventRoot() {
+    if (!g_challengeDbOk) return 0;
+    uintptr_t gm = 0, res = 0, data = 0;
+    uint32_t state = 0, off = 0;
+    if (!SafeRead(g_base + kRvaGameManager, &gm, 8) || !gm) return 0;
+    uintptr_t db = gm + kOffChallengeDb;
+    if (!SafeRead(db, &state, 4) || state != 3) return 0;
+    if (!SafeRead(db + kOffChallengeDbRoot, &res, 8) || !res || !SafeRead(db + kOffChallengeDbRoot + 8, &off, 4) ||
+        !SafeRead(res + 0x28, &data, 8) || !data)
+        return 0;
+    uintptr_t root = data + off, arr;
+    uint32_t n;
+    return RootList(root, &arr, &n) ? root : 0;
 }
 
-uintptr_t EventRoot(bool searchNow) {
+uintptr_t EventRoot(bool readNow) {
     uintptr_t r = g_eventRoot, arr;
     uint32_t n;
     if (r && RootList(r, &arr, &n)) return r;
-    if (!searchNow) return 0;
-    ULONGLONG t0 = GetTickCount64();
-    r = ScanForEventRoot();
+    if (!readNow) return 0;
+    r = ReadEventRoot();
     g_eventRoot = r;
-    Log("event records: %s (%llu ms)", r ? "found" : "not found", (unsigned long long)(GetTickCount64() - t0));
+    static uintptr_t logged = 1;
+    if (r != logged) {
+        logged = r;
+        Log("event records: %s", r ? "found (challenge database)" : "not available yet (challenge database not loaded)");
+    }
     return r;
 }
 
-DWORD WINAPI FindEventRootThread(LPVOID) {
-    EventRoot(true);
-    InterlockedExchange(&g_rootSearch, 0);
-    return 0;
-}
-
-void StartEventRootSearch() {   // main menu: find the records in the background before the first launch
-    if (g_eventRoot || InterlockedCompareExchange(&g_rootSearch, 1, 0) != 0) return;
-    HANDLE t = CreateThread(nullptr, 0, FindEventRootThread, nullptr, 0, nullptr);
-    if (t) CloseHandle(t);
-    else InterlockedExchange(&g_rootSearch, 0);
-}
+void StartEventRootSearch() { EventRoot(true); }   // main menu: before the first launch
 
 // The event record (instance address) by id: binary search of the root's sorted list.
 uintptr_t FindEventRecord(uint32_t want) {
     for (int attempt = 0; attempt < 2; ++attempt) {
-        while (g_rootSearch) Sleep(5);   // a background search is running
         uintptr_t root = EventRoot(true), arr;
         uint32_t n;
         if (!root || !RootList(root, &arr, &n)) return 0;
@@ -2024,20 +2035,38 @@ bool InstallIntroSetupHook() {
 //   +0x08 u64 -> sorted u32 ids[count]   (== table + 0x18)
 //   +0x10 u64 -> entry[count]             (== table + 0x18 + 4*count)
 //   entry = u64 -> UTF-16 text, u64 length in chars including the terminating 0.
-// The table is found by scanning the game's private read/write memory for that self-referencing header,
-// from DllMain on (the menu copies the text when it builds its items, so the table has to be patched
-// before that). If the label still reads "WALL" (English) its entry is pointed at the ini text
-// ([MenuLabel] Text, kept in g_labelText below). The entry is watched and patched again if the game
-// resets it or reloads the table.
+// v41: no more memory search. The game's LanguageManager loads the table in its load step 0x3F11D0
+// (bool (manager, request); called every frame by the manager update 0x3EE850): state manager+0x28 goes
+// 1 -> 2 (bundle UI\LANGUAGE\<n>.BNDL requested) -> 3 (loaded: manager+0x20 = the table, set at 0x3F146E;
+// state 3 written at 0x3F14CD); in state 3 it returns 1 at once. A language change sets the state back to 1.
+// The hook calls the original, then, in state 3, patches the table it finds at manager+0x20 the first time it
+// sees it (before the main menu copies its texts), and re-checks the patched entry every 64 calls.
+// If the label still reads "WALL" (English) its entry is pointed at the ini text ([MenuLabel] Text).
 
 const uint32_t kWallLabelId = 1263478;
 const wchar_t kWallText[] = L"WALL";
 wchar_t g_labelText[256];  // zero-padded: a reader that still has the old length stays inside it
 uint64_t g_labelLen;       // chars including the terminating 0
 
-struct LabelPatch { uintptr_t table; uintptr_t entry; bool patched; };
-LabelPatch g_labels[4];
-int g_labelCount;
+const uintptr_t kRvaLanguageLoad = 0x3F11D0;
+const uint8_t kLanguageLoadPrologue[] = {0x40, 0x55, 0x56, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xB9, 0x48,
+                                         0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0x8B, 0x41, 0x28};
+const size_t kLanguageLoadStolen = 9;  // push rbp; push rsi; push rdi; lea rbp,[rsp-47h]
+const uintptr_t kLanguageTableStoreAt = 0x3F146E;  // mov [rcx+20h], r15
+const uint8_t kLanguageTableStore[] = {0x4C, 0x89, 0x79, 0x20};
+const uintptr_t kLanguageLoadedAt = 0x3F14CD;      // mov dword [rdi+28h], 3
+const uint8_t kLanguageLoaded[] = {0xC7, 0x47, 0x28, 0x03, 0x00, 0x00, 0x00};
+const uintptr_t kLangMgrTable = 0x20, kLangMgrState = 0x28;
+
+typedef uint8_t (*Fn_LanguageLoad)(uintptr_t mgr, void* a2, void* a3, void* a4);
+Fn_LanguageLoad g_languageLoadOriginal;
+
+// game thread only (the manager update)
+uintptr_t g_labelTable;      // the table last handled (patched, or left alone because it isn't "WALL")
+uintptr_t g_labelEntry;      // its Wall entry, 0 if not patched
+uintptr_t g_labelBadTable;   // a table that failed the checks (logged once)
+bool g_labelSeenLoading, g_labelSeenAny;
+unsigned g_labelCalls;
 
 // Reads [MenuLabel] Text= from the ini. The file is read here directly (not with GetPrivateProfileString)
 // so that UTF-8 text works as well as ANSI and UTF-16. "\n" in the value is a line break.
@@ -2152,106 +2181,135 @@ bool ValidLabelTable(uintptr_t t, uint32_t* countOut, uintptr_t* idsOut, uintptr
     return true;
 }
 
-// Points the Wall label of the table at `t` to the ini text. Returns true when the table is a language
-// table that holds the label (patched, or left alone because it isn't "WALL").
-bool PatchLabelTable(uintptr_t t, bool track) {
+// The Wall entry of the table at t (0 if t is not a language table holding string 1263478).
+uintptr_t LabelEntry(uintptr_t t, uint32_t* countOut) {
     uint32_t count;
     uintptr_t ids, ents;
-    if (!ValidLabelTable(t, &count, &ids, &ents)) return false;
-    int lo = 0, hi = (int)count - 1, idx = -1;
+    if (!ValidLabelTable(t, &count, &ids, &ents)) return 0;
+    int lo = 0, hi = (int)count - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         uint32_t id;
-        if (!SafeRead(ids + 4 * (uintptr_t)mid, &id, 4)) return false;
-        if (id == kWallLabelId) { idx = mid; break; }
+        if (!SafeRead(ids + 4 * (uintptr_t)mid, &id, 4)) return 0;
+        if (id == kWallLabelId) { *countOut = count; return ents + 16 * (uintptr_t)mid; }
         if (id < kWallLabelId) lo = mid + 1;
         else hi = mid - 1;
     }
-    if (idx < 0) return false;
-    uintptr_t entry = ents + 16 * (uintptr_t)idx;
+    return 0;
+}
+
+// Points the entry at the ini text if it reads "WALL". Returns false when it holds another text.
+bool PatchLabelEntry(uintptr_t entry) {
     uint64_t e[2];
     if (!SafeRead(entry, e, 16)) return false;
-    if (e[0] == (uint64_t)(uintptr_t)g_labelText) {
-        if (track && g_labelCount < 4) g_labels[g_labelCount++] = LabelPatch{t, entry, true};
-        return true;
-    }
+    if (e[0] == (uint64_t)(uintptr_t)g_labelText) return true;
     wchar_t text[8] = {};
-    if (e[1] != 5 || !SafeRead((uintptr_t)e[0], text, sizeof(kWallText)) || memcmp(text, kWallText, sizeof(kWallText)) != 0) {
-        if (track && g_labelCount < 4) g_labels[g_labelCount++] = LabelPatch{t, entry, false};
-        Log("menu label: string %u is not \"WALL\" in this language - left as it is", kWallLabelId);
-        return true;
-    }
-    if (track && g_labelCount < 4) g_labels[g_labelCount++] = LabelPatch{t, entry, true};
+    if (e[1] != 5 || !SafeRead((uintptr_t)e[0], text, sizeof(kWallText)) || memcmp(text, kWallText, sizeof(kWallText)) != 0)
+        return false;
     // pointer first, then length (g_labelText is zero-padded, so either order of reads stays in it)
     InterlockedExchange64((volatile LONG64*)entry, (LONG64)(uintptr_t)g_labelText);
     InterlockedExchange64((volatile LONG64*)(entry + 8), (LONG64)g_labelLen);
-    Log("menu label: patched (language table at %p, %u strings, entry %p)", (void*)t, count, (void*)entry);
     return true;
 }
 
-// One pass over the game's private read/write memory, looking for language tables.
-int ScanForLanguageTables() {
-    static uint8_t buf[(4 << 20) + 0x18];
-    const size_t kChunk = 4 << 20;
-    int found = 0;
-    uintptr_t bufLo = (uintptr_t)buf, bufHi = bufLo + sizeof(buf);
-    MEMORY_BASIC_INFORMATION mbi;
-    for (uintptr_t a = 0x10000; a < 0x7FFFFFFF0000ull; a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
-        if (VirtualQuery((void*)a, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
-        uintptr_t r = (uintptr_t)mbi.BaseAddress, end = r + mbi.RegionSize;
-        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || mbi.Protect != PAGE_READWRITE || (r < bufHi && end > bufLo))
-            continue;
-        for (uintptr_t c = r; c < end; c += kChunk) {
-            size_t n = end - c < sizeof(buf) ? (size_t)(end - c) : sizeof(buf);
-            SIZE_T got = 0;
-            if (!ReadProcessMemory(GetCurrentProcess(), (const void*)c, buf, n, &got) || got < 0x18) continue;
-            for (size_t i = 0; i + 0x18 <= got && i < kChunk; i += 8) {
-                const uint32_t* h = (const uint32_t*)(buf + i);
-                if (h[0] != 1 || h[1] < 16 || h[1] > 1000000) continue;
-                uintptr_t t = c + i;
-                if (*(const uint64_t*)(buf + i + 8) != t + 0x18 || *(const uint64_t*)(buf + i + 16) != t + 0x18 + 4ull * h[1]) continue;
-                bool known = false;
-                for (int k = 0; k < g_labelCount; ++k) known |= g_labels[k].table == t;
-                if (!known && PatchLabelTable(t, true)) ++found;
-            }
-        }
+void OnLanguageManager(uintptr_t mgr, int stateBefore) {
+    if (stateBefore != 3) g_labelSeenLoading = true;
+    int state = 0;
+    uintptr_t t = 0;
+    if (!SafeRead(mgr + kLangMgrState, &state, 4) || state != 3 || !SafeRead(mgr + kLangMgrTable, &t, 8) || !t) return;
+    if (!g_labelSeenAny) {
+        g_labelSeenAny = true;
+        if (!g_labelSeenLoading)
+            Log("menu label: the language was already loaded when the hook went in - the main menu may still read WALL");
     }
-    return found;
+    if (t == g_labelTable) {
+        // the patched entry: put back if the game reset it (every 64 calls)
+        if (g_labelEntry && (++g_labelCalls & 63) == 0) {
+            uint64_t p = 0;
+            if (SafeRead(g_labelEntry, &p, 8) && p != (uint64_t)(uintptr_t)g_labelText && PatchLabelEntry(g_labelEntry))
+                Log("menu label: the game reset the label - patched again");
+        }
+        return;
+    }
+    uint32_t count = 0;
+    uintptr_t entry = LabelEntry(t, &count);
+    if (!entry) {
+        if (t != g_labelBadTable) {
+            g_labelBadTable = t;
+            Log("menu label: the language table at %p is not as expected (no string %u) - WALL stays", (void*)t, kWallLabelId);
+        }
+        return;
+    }
+    g_labelTable = t;
+    g_labelCalls = 0;
+    if (PatchLabelEntry(entry)) {
+        g_labelEntry = entry;
+        Log("menu label: patched (language manager %p, table %p, %u strings, entry %p)", (void*)mgr, (void*)t, count, (void*)entry);
+    } else {
+        g_labelEntry = 0;
+        Log("menu label: string %u is not \"WALL\" in this language - left as it is", kWallLabelId);
+    }
 }
 
-DWORD WINAPI LabelWorker(LPVOID) {
-    LoadLabelSettings();
-    if (g_labelLen <= 1) return 0;
-    ULONGLONG started = GetTickCount64();
-    int scans = 0;
-    for (;;) {
-        for (int k = 0; k < g_labelCount;) {
-            LabelPatch l = g_labels[k];
-            uint32_t count;
-            uintptr_t ids, ents;
-            uint64_t p = 0;
-            if (!ValidLabelTable(l.table, &count, &ids, &ents)) {
-                g_labels[k] = g_labels[--g_labelCount];
-                Log("menu label: language table gone (reloaded?) - searching again");
-                continue;
-            }
-            if (l.patched && SafeRead(l.entry, &p, 8) && p != (uint64_t)(uintptr_t)g_labelText) {
-                Log("menu label: the game reset the label");
-                PatchLabelTable(l.table, false);  // patches again if it reads "WALL" once more
-            }
-            ++k;
-        }
-        if (g_labelCount == 0) {
-            ULONGLONG t0 = GetTickCount64();
-            int n = ScanForLanguageTables();
-            ++scans;
-            if (n || scans == 1 || scans % 100 == 0)
-                Log("menu label: search %d found %d language table(s) in %u ms", scans, n, (unsigned)(GetTickCount64() - t0));
-        }
-        // nothing found yet: search every 50 ms for the first two minutes, then every 2 s
-        Sleep(g_labelCount ? 500 : (GetTickCount64() - started < 120000 ? 50 : 2000));
+uint8_t Hook_LanguageLoad(uintptr_t mgr, void* a2, void* a3, void* a4) {
+    int stateBefore = 0;
+    SafeRead(mgr + kLangMgrState, &stateBefore, 4);
+    uint8_t r = g_languageLoadOriginal(mgr, a2, a3, a4);
+    if (r && g_labelLen > 1) OnLanguageManager(mgr, stateBefore);
+    return r;
+}
+
+bool InstallInline(const char* what, uintptr_t rva, const uint8_t* prologue, size_t checkLen, size_t stolen, int tslot,
+                   int sslot, void* hook, void** original);
+
+// Stub (slots 48-51): saves the argument registers, calls OnLocation(rdx, r9, [entry rsp+0x28]), restores them and
+// continues in the trampoline (slots 44-45), so the getter gets every argument, stack ones included, unchanged.
+bool InstallLocationHook() {
+    if (!CheckBytes(kLocationGetterCheckAt, kLocationGetterCheck, sizeof(kLocationGetterCheck)) ||
+        !CheckBytes(kLocationGetterReadAt, kLocationGetterRead, sizeof(kLocationGetterRead))) {
+        Log("event lists: location getter: game code differs from the analysed build - the picker shows every mode");
+        return false;
     }
-    return 0;
+    // the stub is complete before the getter is patched to reach it; the trampoline InstallInline builds is at slot 44
+    static const uint8_t kStub[] = {
+        0x51, 0x52, 0x41, 0x50, 0x41, 0x51,  // push rcx; push rdx; push r8; push r9
+        0x48, 0x83, 0xEC, 0x28,              // sub rsp, 28h
+        0x48, 0x89, 0xD1,                    // mov rcx, rdx        (location handle)
+        0x4C, 0x89, 0xCA,                    // mov rdx, r9         (request)
+        0x44, 0x8B, 0x44, 0x24, 0x70,        // mov r8d, [rsp+70h]  (5th argument: property index)
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,  // mov rax, OnLocation          (imm64 at 23)
+        0xFF, 0xD0,                          // call rax
+        0x48, 0x83, 0xC4, 0x28,              // add rsp, 28h
+        0x41, 0x59, 0x41, 0x58, 0x5A, 0x59,  // pop r9; pop r8; pop rdx; pop rcx
+        0xFF, 0x25, 0, 0, 0, 0,              // jmp [rip+0] -> trampoline
+        0, 0, 0, 0, 0, 0, 0, 0};             // (imm64 at 49)
+    static_assert(sizeof(kStub) <= 64, "stub too long for slots 48-51");
+    uint8_t* stub = g_tramp + 16 * 48;
+    memcpy(stub, kStub, sizeof(kStub));
+    uintptr_t f = (uintptr_t)&OnLocation, t = (uintptr_t)(g_tramp + 16 * 44);
+    memcpy(stub + 23, &f, 8);
+    memcpy(stub + 49, &t, 8);
+    FlushInstructionCache(GetCurrentProcess(), stub, sizeof(kStub));
+    void* tramp = nullptr;
+    // InstallInline: trampoline at slots 44-45 (stolen bytes + jump back), its own "jmp [rip] -> hook" at slot 47,
+    // with the hook = our stub
+    if (!InstallInline("event lists: location getter", kRvaLocationGetter, kLocationGetterPrologue,
+                       sizeof(kLocationGetterPrologue), sizeof(kLocationGetterPrologue), 44, 47, stub, &tramp))
+        return false;
+    return tramp == (void*)t;
+}
+
+// Trampoline slots 40-41, stub 43.
+bool InstallLabelHook() {
+    if (g_labelLen <= 1) return false;
+    if (!CheckBytes(kLanguageTableStoreAt, kLanguageTableStore, sizeof(kLanguageTableStore)) ||
+        !CheckBytes(kLanguageLoadedAt, kLanguageLoaded, sizeof(kLanguageLoaded))) {
+        Log("menu label: language load step: game code differs from the analysed build - WALL stays");
+        return false;
+    }
+    return InstallInline("menu label: language load step", kRvaLanguageLoad, kLanguageLoadPrologue,
+                         sizeof(kLanguageLoadPrologue), kLanguageLoadStolen, 40, 43, (void*)Hook_LanguageLoad,
+                         (void**)&g_languageLoadOriginal);
 }
 
 // Inline hook of the weapon set loader (same technique as the intro setup; slots 16-17 trampoline, 19 stub).
@@ -2654,11 +2712,43 @@ bool InstallPickerDetailsHook() {
 }
 
 DWORD WINAPI Worker(LPVOID) {
+    LoadLabelSettings();
     IMAGE_DOS_HEADER dos;
     IMAGE_NT_HEADERS64 nt;
     if (!SafeRead(g_base, &dos, sizeof(dos)) || !SafeRead(g_base + dos.e_lfanew, &nt, sizeof(nt))) {
         Log("cannot read the exe headers - plugin disabled");
         return 0;
+    }
+    {
+        // v40: which build and which store, for bug reports (the folder decides the store; the path itself is not
+        // logged, as it can contain the user's name)
+        wchar_t exe[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        if (n >= MAX_PATH) n = 0;
+        exe[n] = 0;
+        wchar_t low[MAX_PATH];
+        lstrcpyW(low, exe);
+        CharLowerW(low);
+        // v41: an EA app install in a custom folder has __Installer next to the exe
+        wchar_t inst[MAX_PATH + 16];
+        lstrcpyW(inst, exe);
+        wchar_t* slash = wcsrchr(inst, L'\\');
+        bool eaFolder = false;
+        if (slash) {
+            lstrcpyW(slash + 1, L"__Installer");
+            DWORD at = GetFileAttributesW(inst);
+            eaFolder = at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY);
+        }
+        const char* store = wcsstr(low, L"\\steamapps\\") ? "Steam"
+                            : (wcsstr(low, L"\\ea games\\") || eaFolder) ? "EA app" : "unknown";
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        unsigned long long size = 0;
+        if (n && GetFileAttributesExW(exe, GetFileExInfoStandard, &fa)) size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        const wchar_t* name = n ? exe + n : exe;
+        while (name > exe && name[-1] != L'\\' && name[-1] != L'/') --name;
+        char nameA[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, nameA, sizeof(nameA), nullptr, nullptr);
+        Log("game: %s, %llu bytes, PE timestamp %08X, store %s", nameA, size, (unsigned)nt.FileHeader.TimeDateStamp, store);
     }
     if (nt.FileHeader.TimeDateStamp != kExpectedTimestamp) {
         Log("unsupported game build (PE timestamp %08X, expected %08X) - plugin disabled",
@@ -2692,6 +2782,8 @@ DWORD WINAPI Worker(LPVOID) {
         Log("could not allocate trampoline memory - plugin disabled");
         return 0;
     }
+    // first, before the main menu is built: the label hook (v41, replaces the memory search)
+    InstallLabelHook();
     for (int k = 0; k < kBindingCount; ++k)
         if (!Install(g_bindings[k], k)) {
             Log("could not hook %s", g_bindings[k].name);
@@ -2705,6 +2797,10 @@ DWORD WINAPI Worker(LPVOID) {
     if (!InstallVmUpdateHook()) Log("competitor info update not hooked - intro name tags stay");
     if (!InstallLoadingScreenHooks()) Log("event info not hooked - the loading screen keeps the event's own time, weather and class");
     if (!InstallPickerDetailsHook()) Log("picker details not hooked - the picker's details tab shows no weapon counts");
+    if (!InstallLocationHook()) Log("event lists not hooked - the picker shows every mode");
+    g_challengeDbOk = CheckBytes(kChallengeDbStateAt, kChallengeDbState, sizeof(kChallengeDbState)) &&
+                      CheckBytes(kChallengeDbRootAt, kChallengeDbRoot, sizeof(kChallengeDbRoot));
+    if (!g_challengeDbOk) Log("event records: challenge database: game code differs from the analysed build - AI count, medals and per-event settings are off");
     if (GetPrivateProfileIntW(L"Overlay", L"Enabled", 1, g_iniPath)) Overlay_Start();
     else Log("overlay: disabled in the ini");
     Log("ready: %d routes mapped, %d events ignored; start positions, opponents, conditions, difficulty, weapons and event info handled for Single Race events; AI count set at launch",
@@ -2831,11 +2927,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         if (GetFileSize(g_log, nullptr) > (1u << 20)) SetEndOfFile(g_log);
         SetFilePointer(g_log, 0, nullptr, FILE_END);
     }
-    Log("---- NFSHPR Single Race helper 39 (%d cars in the class table)", kVehicleCount);
+    Log("---- NFSHPR Single Race helper 42 (%d cars in the class table)", kVehicleCount);
     HANDLE t = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
-    // the label search starts at once: the main menu copies its texts before the game code is unpacked
-    // and the hooks are in (it checks its data itself and needs no game code)
-    if (HANDLE lt = CreateThread(nullptr, 0, LabelWorker, nullptr, 0, nullptr)) CloseHandle(lt);
     return TRUE;
 }
